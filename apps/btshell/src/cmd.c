@@ -117,7 +117,7 @@ static bool adv_instances[BLE_ADV_INSTANCES];
 static int
 cmd_advertise_configure(int argc, char **argv)
 {
-    struct ble_gap_ext_adv_params params;
+    struct ble_gap_ext_adv_params params = {0};
     int8_t selected_tx_power;
     uint8_t instance;
     int rc;
@@ -140,13 +140,24 @@ cmd_advertise_configure(int argc, char **argv)
 
     memset(&params, 0, sizeof(params));
 
-    params.connectable = parse_arg_bool_dflt("connectable", 0, &rc);
+    params.legacy_pdu = parse_arg_bool_dflt("legacy", 0, &rc);
+    if (rc != 0) {
+        console_printf("invalid 'legacy' parameter\n");
+        return rc;
+    }
+
+    if (params.legacy_pdu) {
+        params.connectable = 1;
+        params.scannable = 1;
+    }
+
+    params.connectable = parse_arg_bool_dflt("connectable", params.connectable, &rc);
     if (rc != 0) {
         console_printf("invalid 'connectable' parameter\n");
         return rc;
     }
 
-    params.scannable = parse_arg_bool_dflt("scannable", 0, &rc);
+    params.scannable = parse_arg_bool_dflt("scannable", params.scannable, &rc);
     if (rc != 0) {
         console_printf("invalid 'scannable' parameter\n");
         return rc;
@@ -161,12 +172,6 @@ cmd_advertise_configure(int argc, char **argv)
     params.anonymous = parse_arg_bool_dflt("anonymous", 0, &rc);
     if (rc != 0) {
         console_printf("invalid 'anonymous' parameter\n");
-        return rc;
-    }
-
-    params.legacy_pdu = parse_arg_bool_dflt("legacy", 0, &rc);
-    if (rc != 0) {
-        console_printf("invalid 'legacy' parameter\n");
         return rc;
     }
 
@@ -199,6 +204,17 @@ cmd_advertise_configure(int argc, char **argv)
     } else {
         console_printf("invalid 'peer_addr' parameter\n");
         return rc;
+    }
+
+
+    params.directed = parse_arg_bool_dflt("directed", params.directed, &rc);
+    if (rc != 0) {
+        console_printf("invalid 'directed' parameter\n");
+        return rc;
+    }
+
+    if (params.directed && params.legacy_pdu) {
+        params.scannable = 0;
     }
 
     params.own_addr_type = parse_arg_kv_dflt("own_addr_type",
@@ -322,6 +338,7 @@ cmd_advertise_start(int argc, char **argv)
     int max_events;
     uint8_t instance;
     int duration;
+    bool restart;
     int rc;
 
     rc = parse_arg_all(argc - 1, argv + 1);
@@ -352,7 +369,13 @@ cmd_advertise_start(int argc, char **argv)
         return rc;
     }
 
-    rc = ble_gap_ext_adv_start(instance, duration, max_events);
+    restart = parse_arg_bool_dflt("restart", 0, &rc);
+    if (rc != 0) {
+        console_printf("invalid 'restart' parameter\n");
+        return rc;
+    }
+
+    rc = btshell_ext_adv_start(instance, duration, max_events, restart);
     if (rc) {
         console_printf("failed to start advertising instance\n");
         return rc;
@@ -383,7 +406,7 @@ cmd_advertise_stop(int argc, char **argv)
         return rc;
     }
 
-    rc = ble_gap_ext_adv_stop(instance);
+    rc = btshell_ext_adv_stop(instance);
     if (rc) {
         console_printf("failed to stop advertising instance\n");
         return rc;
@@ -430,6 +453,7 @@ static const struct shell_param advertise_configure_params[] = {
     {"instance", "default: 0"},
     {"connectable", "connectable advertising, usage: =[0-1], default: 0"},
     {"scannable", "scannable advertising, usage: =[0-1], default: 0"},
+    {"directed", "directed advertising, usage: =[0-1], default: 0"},
     {"peer_addr_type", "usage: =[public|random|public_id|random_id], default: public"},
     {"peer_addr", "usage: =[XX:XX:XX:XX:XX:XX]"},
     {"own_addr_type", "usage: =[public|random|rpa_pub|rpa_rnd], default: public"},
@@ -471,6 +495,7 @@ static const struct shell_param advertise_start_params[] = {
     {"instance", "default: 0"},
     {"duration", "advertising duration in 10ms units, default: 0 (forever)"},
     {"max_events", "max number of advertising events, default: 0 (no limit)"},
+    {"restart", "restart advertising after disconnect, usage: =[0-1], default: 0"},
     {NULL, NULL}
 };
 
@@ -526,6 +551,7 @@ cmd_advertise(int argc, char **argv)
     ble_addr_t peer_addr;
     ble_addr_t *peer_addr_param = &peer_addr;
     uint8_t own_addr_type;
+    bool restart;
     int rc;
 
     rc = parse_arg_all(argc - 1, argv + 1);
@@ -569,6 +595,12 @@ cmd_advertise(int argc, char **argv)
         peer_addr_param = NULL;
     } else if (rc != 0) {
         console_printf("invalid 'peer_addr' parameter\n");
+        return rc;
+    }
+
+    restart = parse_arg_bool_dflt("restart", 0, &rc);
+    if (rc != 0) {
+        console_printf("invalid 'restart' parameter\n");
         return rc;
     }
 
@@ -618,7 +650,7 @@ cmd_advertise(int argc, char **argv)
     }
 
     rc = btshell_adv_start(own_addr_type, peer_addr_param, duration_ms,
-                           &params);
+                           &params, restart);
     if (rc != 0) {
         console_printf("advertise fail: %d\n", rc);
         return rc;
@@ -641,6 +673,7 @@ static const struct shell_param advertise_params[] = {
     {"interval_max", "usage: =[0-UINT16_MAX], default: 0"},
     {"high_duty", "usage: =[0-1], default: 0"},
     {"duration", "usage: =[1-INT32_MAX], default: INT32_MAX"},
+    {"restart", "restart advertising after disconnect, usage: =[0-1], default: 0"},
     {NULL, NULL}
 };
 
@@ -1494,6 +1527,7 @@ cmd_set_adv_data_or_scan_rsp(int argc, char **argv, bool scan_rsp)
     uint8_t eddystone_url_body_len;
     uint8_t eddystone_url_suffix;
     uint8_t eddystone_url_scheme;
+    int8_t eddystone_measured_power = 0;
     char eddystone_url_body[BLE_EDDYSTONE_URL_MAX_LEN];
     char *eddystone_url_full;
     int svc_data_uuid16_len;
@@ -1735,6 +1769,14 @@ cmd_set_adv_data_or_scan_rsp(int argc, char **argv, bool scan_rsp)
         return rc;
     }
 
+    tmp = parse_arg_long_bounds("eddystone_measured_power", -100, 20, &rc);
+    if (rc == 0) {
+        eddystone_measured_power = tmp;
+    } else if (rc != ENOENT) {
+        console_printf("invalid 'eddystone_measured_power' parameter\n");
+        return rc;
+    }
+
     eddystone_url_full = parse_arg_extract("eddystone_url");
     if (eddystone_url_full != NULL) {
         rc = parse_eddystone_url(eddystone_url_full, &eddystone_url_scheme,
@@ -1748,7 +1790,8 @@ cmd_set_adv_data_or_scan_rsp(int argc, char **argv, bool scan_rsp)
         rc = ble_eddystone_set_adv_data_url(&adv_fields, eddystone_url_scheme,
                                             eddystone_url_body,
                                             eddystone_url_body_len,
-                                            eddystone_url_suffix);
+                                            eddystone_url_suffix,
+                                            eddystone_measured_power);
     } else {
 #if MYNEWT_VAL(BLE_EXT_ADV)
         /* Default to legacy PDUs size, mbuf chain will be increased if needed
@@ -1834,6 +1877,7 @@ static const struct shell_param set_adv_data_params[] = {
     {"service_data_uuid128", "usage: =[XX:XX...]"},
     {"uri", "usage: =[XX:XX...]"},
     {"mfg_data", "usage: =[XX:XX...]"},
+    {"measured_power", "usage: =[-100-20]"},
     {"eddystone_url", "usage: =[string]"},
 #if MYNEWT_VAL(BLE_EXT_ADV)
     {"extra_data_len", "usage: =[UINT16]"},
@@ -2423,6 +2467,16 @@ cmd_keystore_iterator(int obj_type,
                 console_printf("\n");
             }
             break;
+        case BLE_STORE_OBJ_TYPE_CCCD:
+            console_printf("Key: ");
+            console_printf("addr_type=%u ", val->cccd.peer_addr.type);
+            print_addr(val->cccd.peer_addr.val);
+            console_printf("\n");
+
+            console_printf("    char_val_handle: %d\n", val->cccd.chr_val_handle);
+            console_printf("    flags:           0x%02x\n", val->cccd.flags);
+            console_printf("    changed:         %d\n", val->cccd.value_changed);
+            break;
     }
     return 0;
 }
@@ -2604,6 +2658,59 @@ static const struct shell_cmd_help security_pair_help = {
     .summary = "start pairing procedure for connection",
     .usage = NULL,
     .params = security_pair_params,
+};
+#endif
+
+/*****************************************************************************
+ * $security-unpair                                                            *
+ *****************************************************************************/
+
+static int
+cmd_security_unpair(int argc, char **argv)
+{
+    ble_addr_t peer;
+    int rc;
+
+    rc = parse_arg_all(argc - 1, argv + 1);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = parse_arg_mac("peer_addr", peer.val);
+    if (rc == 0) {
+
+        peer.type = parse_arg_kv_dflt("peer_addr_type",
+                                      cmd_peer_addr_types,
+                                      BLE_ADDR_PUBLIC, &rc);
+        if (rc != 0) {
+            console_printf("invalid 'peer_addr_type' parameter\n");
+            return rc;
+        }
+    } else {
+        console_printf("invalid 'peer_addr' parameter\n");
+        return rc;
+    }
+
+    rc = ble_gap_unpair(&peer);
+    if (rc != 0) {
+        console_printf("error unpairing; rc=%d\n", rc);
+        return rc;
+    }
+
+    return 0;
+}
+
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+static const struct shell_param security_unpair_params[] = {
+    {"peer_addr_type", "usage: =[public|random|public_id|random_id], default: public"},
+    {"peer_addr", "usage: =[XX:XX:XX:XX:XX:XX]"},
+    {NULL, NULL}
+};
+
+static const struct shell_cmd_help security_unpair_help = {
+    .summary = "unpair a peer device",
+    .usage = NULL,
+    .params = security_unpair_params,
 };
 #endif
 
@@ -3056,6 +3163,58 @@ static const struct shell_cmd_help phy_read_help = {
     .usage = NULL,
     .params = phy_read_params,
 };
+
+/*****************************************************************************
+ * $host-enable                                                              *
+ *****************************************************************************/
+
+static int
+cmd_host_enable(int argc, char **argv)
+{
+    ble_hs_sched_start();
+
+    return 0;
+}
+
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+static const struct shell_cmd_help host_enable_help = {
+    .summary = "start the NimBLE host",
+    .usage = NULL,
+    .params = NULL,
+};
+#endif
+
+/*****************************************************************************
+ * $host-disable                                                              *
+ *****************************************************************************/
+
+static void
+on_stop(int status, void *arg)
+{
+    if (status == 0) {
+        console_printf("host stopped\n");
+    } else {
+        console_printf("host failed to stop; rc=%d\n", status);
+    }
+}
+
+static int
+cmd_host_disable(int argc, char **argv)
+{
+    static struct ble_hs_stop_listener listener;
+    int rc;
+
+    rc = ble_hs_stop(&listener, on_stop, NULL);
+    return rc;
+}
+
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+static const struct shell_cmd_help host_disable_help = {
+    .summary = "stop the NimBLE host",
+    .usage = NULL,
+    .params = NULL,
+};
+#endif
 
 /*****************************************************************************
  * $gatt-discover                                                            *
@@ -3703,6 +3862,13 @@ static const struct shell_cmd btshell_commands[] = {
 #endif
     },
     {
+        .sc_cmd = "security-unpair",
+        .sc_cmd_func = cmd_security_unpair,
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+        .help = &security_unpair_help,
+#endif
+    },
+    {
         .sc_cmd = "security-start",
         .sc_cmd_func = cmd_security_start,
 #if MYNEWT_VAL(SHELL_CMD_HELP)
@@ -3750,6 +3916,20 @@ static const struct shell_cmd btshell_commands[] = {
         .sc_cmd_func = cmd_phy_read,
 #if MYNEWT_VAL(SHELL_CMD_HELP)
         .help = &phy_read_help,
+#endif
+    },
+    {
+        .sc_cmd = "host-enable",
+        .sc_cmd_func = cmd_host_enable,
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+        .help = &host_enable_help,
+#endif
+    },
+    {
+        .sc_cmd = "host-disable",
+        .sc_cmd_func = cmd_host_disable,
+#if MYNEWT_VAL(SHELL_CMD_HELP)
+        .help = &host_disable_help,
 #endif
     },
     { NULL, NULL, NULL },

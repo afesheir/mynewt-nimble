@@ -485,10 +485,6 @@ ble_ll_resolve_set_priv_mode(uint8_t *cmdbuf)
         return BLE_ERR_CMD_DISALLOWED;
     }
 
-    if (!ble_ll_resolv_enabled()) {
-        return BLE_ERR_CMD_DISALLOWED;
-    }
-
     /* cmdbuf = addr_type(0) | addr(6) | priv_mode(1) */
     rl = ble_ll_resolv_list_find(&cmdbuf[1], cmdbuf[0]);
     if (!rl) {
@@ -531,6 +527,18 @@ ble_ll_resolv_get_priv_addr(struct ble_ll_resolv_entry *rl, int local,
         memcpy(addr, rl->rl_peer_rpa, BLE_DEV_ADDR_LEN);
     }
 
+    OS_EXIT_CRITICAL(sr);
+}
+
+void
+ble_ll_resolv_set_peer_rpa(int index, uint8_t *rpa)
+{
+    os_sr_t sr;
+    struct ble_ll_resolv_entry *rl;
+
+    OS_ENTER_CRITICAL(sr);
+    rl = &g_ble_ll_resolv_list[index];
+    memcpy(rl->rl_peer_rpa, rpa, BLE_DEV_ADDR_LEN);
     OS_EXIT_CRITICAL(sr);
 }
 

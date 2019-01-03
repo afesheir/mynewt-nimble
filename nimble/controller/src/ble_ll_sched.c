@@ -250,8 +250,9 @@ ble_ll_sched_conn_reschedule(struct ble_ll_conn_sm *connsm)
                 break;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
             case BLE_LL_SCHED_TYPE_AUX_SCAN:
-                ble_ll_scan_aux_data_free((struct ble_ll_aux_data *)
+                ble_ll_scan_end_adv_evt((struct ble_ll_aux_data *)
                                           entry->cb_arg);
+
                 break;
 #endif
             default:
@@ -1066,16 +1067,17 @@ adv_resched_pdu_fail:
  *
  * @param sched_type
  *
- * @return int
+ * @return int 0 - removed, 1 - not in the list
  */
-void
+int
 ble_ll_sched_rmv_elem(struct ble_ll_sched_item *sch)
 {
     os_sr_t sr;
     struct ble_ll_sched_item *first;
+    int rc = 1;
 
     if (!sch) {
-        return;
+        return rc;
     }
 
     OS_ENTER_CRITICAL(sr);
@@ -1087,6 +1089,7 @@ ble_ll_sched_rmv_elem(struct ble_ll_sched_item *sch)
 
         TAILQ_REMOVE(&g_ble_ll_sched_q, sch, link);
         sch->enqueued = 0;
+        rc = 0;
 
         if (first == sch) {
             first = TAILQ_FIRST(&g_ble_ll_sched_q);
@@ -1095,6 +1098,39 @@ ble_ll_sched_rmv_elem(struct ble_ll_sched_item *sch)
             }
         }
     }
+    OS_EXIT_CRITICAL(sr);
+
+    return rc;
+}
+
+void
+ble_ll_sched_rmv_elem_type(uint8_t type, sched_remove_cb_func remove_cb)
+{
+    os_sr_t sr;
+    struct ble_ll_sched_item *entry;
+    struct ble_ll_sched_item *first;
+
+    OS_ENTER_CRITICAL(sr);
+    first = TAILQ_FIRST(&g_ble_ll_sched_q);
+
+    TAILQ_FOREACH(entry, &g_ble_ll_sched_q, link) {
+        if (entry->sched_type == type) {
+            if (first == entry) {
+                os_cputime_timer_stop(&g_ble_ll_sched_timer);
+                first = NULL;
+            }
+
+            TAILQ_REMOVE(&g_ble_ll_sched_q, entry, link);
+            remove_cb(entry);
+            entry->enqueued = 0;
+        }
+    }
+
+    if (!first) {
+        first = TAILQ_FIRST(&g_ble_ll_sched_q);
+        os_cputime_timer_start(&g_ble_ll_sched_timer, first->start_time);
+    }
+
     OS_EXIT_CRITICAL(sr);
 }
 
@@ -1288,7 +1324,7 @@ ble_ll_sched_rfclk_chk_restart(void)
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
 /**
- * Called to check if there is place for comming scan req.
+ * Called to check if there is place for a planned scan req.
  *
  * @param chan
  * @param phy_mode
@@ -1326,7 +1362,7 @@ ble_ll_sched_scan_req_over_aux_ptr(uint32_t chan, uint8_t phy_mode)
             return 1;
         }
 
-        ble_ll_scan_aux_data_free((struct ble_ll_aux_data *)sch->cb_arg);
+        ble_ll_scan_end_adv_evt((struct ble_ll_aux_data *)sch->cb_arg);
         TAILQ_REMOVE(&g_ble_ll_sched_q, sch, link);
         sch->enqueued = 0;
         sch = TAILQ_FIRST(&g_ble_ll_sched_q);

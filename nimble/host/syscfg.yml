@@ -16,11 +16,15 @@
 # under the License.
 #
 
-# Package: net/nimble/host
-
 syscfg.defs:
     BLE_HOST:
         description: 'Indicates that a BLE host is present.'
+        value: 1
+
+    BLE_HS_AUTO_START:
+        description: >
+                Causes the BLE host to automatically start during system
+                initialization.
         value: 1
 
     # Debug settings.
@@ -170,6 +174,14 @@ syscfg.defs:
             allows to decrypt air traffic easily and thus should be only used
             for debugging.
         value: 0
+
+    # GAP options.
+    BLE_GAP_MAX_PENDING_CONN_PARAM_UPDATE:
+        description: >
+            Controls the number of connection parameter updates that can be pending
+            simultaneously. Devices with many concurrent connections may need
+            to increase this value.
+        value: 1
 
     # Supported GATT procedures.  By default:
     #     o Notify and indicate are enabled;
@@ -409,6 +421,17 @@ syscfg.defs:
             terminates.  This behavior is not required by the standard, but is
             a necessary workaround when interfacing with some controllers.
         value: 0
+
+    BLE_HS_STOP_ON_SHUTDOWN:
+        description: >
+            Stops the Bluetooth host when the system shuts down.  Stopping
+            entails aborting all GAP procedures and terminating open
+            connections.
+        value: 1
+    BLE_HS_SYSINIT_STAGE:
+        description: >
+            Sysinit stage for the NimBLE host.
+        value: 200
 
 syscfg.vals.BLE_MESH:
     BLE_SM_SC: 1

@@ -237,7 +237,9 @@ static void reset_link(void)
 
 	/* Clear everything except the retransmit delayed work config */
 	memset(&link, 0, offsetof(struct prov_link, tx.retransmit));
-
+#if (MYNEWT_VAL(BLE_MESH_PB_GATT))
+	link.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+#endif
 	link.rx.prev_id = XACT_NVAL;
 
 	if (bt_pub_key_get()) {
@@ -449,7 +451,7 @@ static int prov_send_adv(struct os_mbuf *msg)
 #if (MYNEWT_VAL(BLE_MESH_PB_GATT))
 static int prov_send_gatt(struct os_mbuf *msg)
 {
-	if (!link.conn_handle) {
+	if (link.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
 		BT_ERR("No connection handle!?");
 		return -ENOTCONN;
 	}
@@ -461,7 +463,7 @@ static int prov_send_gatt(struct os_mbuf *msg)
 static inline int prov_send(struct os_mbuf *buf)
 {
 #if (MYNEWT_VAL(BLE_MESH_PB_GATT))
-	if (link.conn_handle) {
+	if (link.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
 		return prov_send_gatt(buf);
 	}
 #endif
@@ -788,6 +790,8 @@ static void send_input_complete(void)
 
 	prov_buf_init(buf, PROV_INPUT_COMPLETE);
 	prov_send(buf);
+
+	os_mbuf_free_chain(buf);
 }
 
 int bt_mesh_input_number(u32_t num)
@@ -1375,6 +1379,8 @@ static void gen_prov_ack(struct prov_rx *rx, struct os_mbuf *buf)
 
 static void gen_prov_start(struct prov_rx *rx, struct os_mbuf *buf)
 {
+	u16_t trailing_space = 0;
+
 	if (link.rx.seg) {
 		BT_WARN("Got Start while there are unreceived segments");
 		return;
@@ -1385,6 +1391,8 @@ static void gen_prov_start(struct prov_rx *rx, struct os_mbuf *buf)
 		gen_prov_ack_send(rx->xact_id);
 		return;
 	}
+	
+	trailing_space = OS_MBUF_TRAILINGSPACE(link.rx.buf);
 
 	link.rx.buf->om_len = net_buf_simple_pull_be16(buf);
 	link.rx.id  = rx->xact_id;
@@ -1399,7 +1407,7 @@ static void gen_prov_start(struct prov_rx *rx, struct os_mbuf *buf)
 		return;
 	}
 
-	if (link.rx.buf->om_len > OS_MBUF_TRAILINGSPACE(link.rx.buf)) {
+	if (link.rx.buf->om_len > trailing_space) {
 		BT_ERR("Too large provisioning PDU (%u bytes)",
 		       link.rx.buf->om_len);
 		close_link(PROV_ERR_NVAL_FMT, CLOSE_REASON_FAILED);

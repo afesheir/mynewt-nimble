@@ -189,6 +189,9 @@ STATS_SECT_START(ble_ll_stats)
     STATS_SECT_ENTRY(aux_scheduled)
     STATS_SECT_ENTRY(aux_received)
     STATS_SECT_ENTRY(aux_fired_for_read)
+    STATS_SECT_ENTRY(aux_allocated)
+    STATS_SECT_ENTRY(aux_freed)
+    STATS_SECT_ENTRY(aux_sched_cb)
     STATS_SECT_ENTRY(aux_conn_req_tx)
     STATS_SECT_ENTRY(aux_conn_rsp_tx)
     STATS_SECT_ENTRY(aux_conn_rsp_err)
@@ -228,6 +231,15 @@ extern STATS_SECT_DECL(ble_ll_stats) ble_ll_stats;
 #define BLE_LL_FEAT_CSA2             (0x00004000)
 #define BLE_LL_FEAT_LE_POWER_CLASS_1 (0x00008000)
 #define BLE_LL_FEAT_MIN_USED_CHAN    (0x00010000)
+
+/* This is initial mask, so if feature exchange will not happen,
+ * but host will want to use this procedure, we will try. If not
+ * succeed, feature bit will be cleared.
+ * Look at LL Features above to find out what is allowed
+ */
+#define BLE_LL_CONN_INITIAL_FEATURES    (0x00000002)
+
+#define BLE_LL_CONN_CLEAR_FEATURE(connsm, feature)   (connsm->conn_features &= ~(feature))
 
 /* LL timing */
 #define BLE_LL_IFS                  (150)       /* usecs */
@@ -417,6 +429,9 @@ int ble_ll_is_rpa(uint8_t *addr, uint8_t addr_type);
 /* Is 'addr' our device address? 'addr_type' is public (0) or random (!=0) */
 int ble_ll_is_our_devaddr(uint8_t *addr, int addr_type);
 
+/* Get identity address 'addr_type' is public (0) or random (!=0) */
+uint8_t *ble_ll_get_our_devaddr(uint8_t addr_type);
+
 /**
  * Called to put a packet on the Link Layer transmit packet queue.
  *
@@ -522,6 +537,10 @@ extern uint64_t g_bletest_SKDm;
 extern uint64_t g_bletest_SKDs;
 extern uint32_t g_bletest_IVm;
 extern uint32_t g_bletest_IVs;
+#endif
+
+#if MYNEWT_VAL(BLE_LL_DIRECT_TEST_MODE)
+void ble_ll_dtm_init();
 #endif
 
 #ifdef __cplusplus

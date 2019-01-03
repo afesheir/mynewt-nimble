@@ -38,7 +38,8 @@
 static void ble_hs_event_rx_hci_ev(struct ble_npl_event *ev);
 static void ble_hs_event_tx_notify(struct ble_npl_event *ev);
 static void ble_hs_event_reset(struct ble_npl_event *ev);
-static void ble_hs_event_start(struct ble_npl_event *ev);
+static void ble_hs_event_start_stage1(struct ble_npl_event *ev);
+static void ble_hs_event_start_stage2(struct ble_npl_event *ev);
 static void ble_hs_timer_sched(int32_t ticks_from_now);
 
 struct os_mempool ble_hs_hci_ev_pool;
@@ -52,9 +53,11 @@ static struct ble_npl_event ble_hs_ev_tx_notifications;
 /** OS event - triggers a full reset. */
 static struct ble_npl_event ble_hs_ev_reset;
 
-static struct ble_npl_event ble_hs_ev_start;
+static struct ble_npl_event ble_hs_ev_start_stage1;
+static struct ble_npl_event ble_hs_ev_start_stage2;
 
 uint8_t ble_hs_sync_state;
+uint8_t ble_hs_enabled_state;
 static int ble_hs_reset_reason;
 
 #define BLE_HS_SYNC_RETRY_TIMEOUT_MS    100 /* ms */
@@ -65,7 +68,7 @@ static void *ble_hs_parent_task;
  * Handles unresponsive timeouts and periodic retries in case of resource
  * shortage.
  */
-static struct ble_npl_callout ble_hs_timer_timer;
+static struct ble_npl_callout ble_hs_timer;
 
 /* Shared queue that the host uses for work items. */
 static struct ble_npl_eventq *ble_hs_evq;
@@ -305,6 +308,12 @@ ble_hs_clear_rx_queue(void)
 }
 
 int
+ble_hs_is_enabled(void)
+{
+    return ble_hs_enabled_state == BLE_HS_ENABLED_STATE_ON;
+}
+
+int
 ble_hs_synced(void)
 {
     return ble_hs_sync_state == BLE_HS_SYNC_STATE_GOOD;
@@ -376,6 +385,9 @@ ble_hs_reset(void)
         ble_gap_conn_broken(conn_handle, ble_hs_reset_reason);
     }
 
+    /* Clear configured addresses. */
+    ble_hs_id_reset();
+
     if (ble_hs_cfg.reset_cb != NULL && ble_hs_reset_reason != 0) {
         ble_hs_cfg.reset_cb(ble_hs_reset_reason);
     }
@@ -394,25 +406,35 @@ ble_hs_timer_exp(struct ble_npl_event *ev)
 {
     int32_t ticks_until_next;
 
-    if (!ble_hs_sync_state) {
+    switch (ble_hs_sync_state) {
+    case BLE_HS_SYNC_STATE_GOOD:
+        ticks_until_next = ble_gattc_timer();
+        ble_hs_timer_sched(ticks_until_next);
+
+        ticks_until_next = ble_gap_timer();
+        ble_hs_timer_sched(ticks_until_next);
+
+        ticks_until_next = ble_l2cap_sig_timer();
+        ble_hs_timer_sched(ticks_until_next);
+
+        ticks_until_next = ble_sm_timer();
+        ble_hs_timer_sched(ticks_until_next);
+
+        ticks_until_next = ble_hs_conn_timer();
+        ble_hs_timer_sched(ticks_until_next);
+        break;
+
+    case BLE_HS_SYNC_STATE_BAD:
         ble_hs_reset();
-        return;
+        break;
+
+    case BLE_HS_SYNC_STATE_BRINGUP:
+    default:
+        /* The timer should not be set in this state. */
+        assert(0);
+        break;
     }
 
-    ticks_until_next = ble_gattc_timer();
-    ble_hs_timer_sched(ticks_until_next);
-
-    ticks_until_next = ble_gap_timer();
-    ble_hs_timer_sched(ticks_until_next);
-
-    ticks_until_next = ble_l2cap_sig_timer();
-    ble_hs_timer_sched(ticks_until_next);
-
-    ticks_until_next = ble_sm_timer();
-    ble_hs_timer_sched(ticks_until_next);
-
-    ticks_until_next = ble_hs_conn_timer();
-    ble_hs_timer_sched(ticks_until_next);
 }
 
 static void
@@ -420,8 +442,12 @@ ble_hs_timer_reset(uint32_t ticks)
 {
     int rc;
 
-    rc = ble_npl_callout_reset(&ble_hs_timer_timer, ticks);
-    BLE_HS_DBG_ASSERT_EVAL(rc == 0);
+    if (!ble_hs_is_enabled()) {
+        ble_npl_callout_stop(&ble_hs_timer);
+    } else {
+        rc = ble_npl_callout_reset(&ble_hs_timer, ticks);
+        BLE_HS_DBG_ASSERT_EVAL(rc == 0);
+    }
 }
 
 static void
@@ -437,9 +463,9 @@ ble_hs_timer_sched(int32_t ticks_from_now)
      * sooner than the previous expiration time.
      */
     abs_time = ble_npl_time_get() + ticks_from_now;
-    if (!ble_npl_callout_is_active(&ble_hs_timer_timer) ||
+    if (!ble_npl_callout_is_active(&ble_hs_timer) ||
             ((ble_npl_stime_t)(abs_time -
-                               ble_npl_callout_get_ticks(&ble_hs_timer_timer))) < 0) {
+                               ble_npl_callout_get_ticks(&ble_hs_timer))) < 0) {
         ble_hs_timer_reset(ticks_from_now);
     }
 }
@@ -451,6 +477,24 @@ ble_hs_timer_resched(void)
      * each module for an up-to-date expiration time.
      */
     ble_hs_timer_reset(0);
+}
+
+static void
+ble_hs_sched_start_stage2(void)
+{
+    ble_npl_eventq_put((struct ble_npl_eventq *)ble_hs_evq_get(),
+                       &ble_hs_ev_start_stage2);
+}
+
+void
+ble_hs_sched_start(void)
+{
+#ifdef MYNEWT
+    ble_npl_eventq_put((struct ble_npl_eventq *)os_eventq_dflt_get(),
+                       &ble_hs_ev_start_stage1);
+#else
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &ble_hs_ev_start_stage1);
+#endif
 }
 
 static void
@@ -490,8 +534,30 @@ ble_hs_event_reset(struct ble_npl_event *ev)
     ble_hs_reset();
 }
 
+/**
+ * Implements the first half of the start process.  This just enqueues another
+ * event on the host parent task's event queue.
+ *
+ * Starting is done in two stages to allow the application time to configure
+ * the event queue to use after system initialization but before the host
+ * starts.
+ */
 static void
-ble_hs_event_start(struct ble_npl_event *ev)
+ble_hs_event_start_stage1(struct ble_npl_event *ev)
+{
+    ble_hs_sched_start_stage2();
+}
+
+/**
+ * Implements the second half of the start process.  This actually starts the
+ * host.
+ *
+ * Starting is done in two stages to allow the application time to configure
+ * the event queue to use after system initialization but before the host
+ * starts.
+ */
+static void
+ble_hs_event_start_stage2(struct ble_npl_event *ev)
 {
     int rc;
 
@@ -550,10 +616,40 @@ ble_hs_start(void)
 {
     int rc;
 
+    ble_hs_lock();
+    switch (ble_hs_enabled_state) {
+    case BLE_HS_ENABLED_STATE_ON:
+        rc = BLE_HS_EALREADY;
+        break;
+
+    case BLE_HS_ENABLED_STATE_STOPPING:
+        rc = BLE_HS_EBUSY;
+        break;
+
+    case BLE_HS_ENABLED_STATE_OFF:
+        ble_hs_enabled_state = BLE_HS_ENABLED_STATE_ON;
+        rc = 0;
+        break;
+
+    default:
+        assert(0);
+        rc = BLE_HS_EUNKNOWN;
+        break;
+    }
+    ble_hs_unlock();
+
+    if (rc != 0) {
+        return rc;
+    }
+
     ble_hs_parent_task = ble_npl_get_current_task_id();
 
-    ble_npl_callout_init(&ble_hs_timer_timer, ble_hs_evq,
-                    ble_hs_timer_exp, NULL);
+    /* Stop the timer just in case the host was already running (e.g., unit
+     * tests).
+     */
+    ble_npl_callout_stop(&ble_hs_timer);
+
+    ble_npl_callout_init(&ble_hs_timer, ble_hs_evq, ble_hs_timer_exp, NULL);
 
     rc = ble_gatts_start();
     if (rc != 0) {
@@ -631,15 +727,15 @@ ble_hs_init(void)
      * bss.
      */
     ble_hs_reset_reason = 0;
+    ble_hs_enabled_state = BLE_HS_ENABLED_STATE_OFF;
 
-    ble_npl_event_init(&ble_hs_ev_tx_notifications, ble_hs_event_tx_notify, NULL);
+    ble_npl_event_init(&ble_hs_ev_tx_notifications, ble_hs_event_tx_notify,
+                       NULL);
     ble_npl_event_init(&ble_hs_ev_reset, ble_hs_event_reset, NULL);
-    ble_npl_event_init(&ble_hs_ev_start, ble_hs_event_start, NULL);
-
-#if BLE_MONITOR
-    rc = ble_monitor_init();
-    SYSINIT_PANIC_ASSERT(rc == 0);
-#endif
+    ble_npl_event_init(&ble_hs_ev_start_stage1, ble_hs_event_start_stage1,
+                       NULL);
+    ble_npl_event_init(&ble_hs_ev_start_stage2, ble_hs_event_start_stage2,
+                       NULL);
 
     ble_hs_hci_init();
 
@@ -664,6 +760,8 @@ ble_hs_init(void)
     rc = ble_gatts_init();
     SYSINIT_PANIC_ASSERT(rc == 0);
 
+    ble_hs_stop_init();
+
     ble_mqueue_init(&ble_hs_rx_q, ble_hs_event_rx_data, NULL);
 
     rc = stats_init_and_reg(
@@ -686,14 +784,23 @@ ble_hs_init(void)
 #else
     ble_hs_evq_set(nimble_port_get_dflt_eventq());
 #endif
+
+#if BLE_MONITOR
+    rc = ble_monitor_init();
+    SYSINIT_PANIC_ASSERT(rc == 0);
+#endif
+
     /* Enqueue the start event to the default event queue.  Using the default
      * queue ensures the event won't run until the end of main().  This allows
      * the application to configure this package in the meantime.
      */
+#if MYNEWT_VAL(BLE_HS_AUTO_START)
 #ifdef MYNEWT
-    ble_npl_eventq_put((struct ble_npl_eventq *)os_eventq_dflt_get(), &ble_hs_ev_start);
+    ble_npl_eventq_put((struct ble_npl_eventq *)os_eventq_dflt_get(),
+                       &ble_hs_ev_start_stage1);
 #else
-    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &ble_hs_ev_start);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &ble_hs_ev_start_stage1);
+#endif
 #endif
 
 #if BLE_MONITOR

@@ -104,7 +104,9 @@ struct ble_ll_adv_sm
     uint8_t peer_addr[BLE_DEV_ADDR_LEN];
     uint8_t initiator_addr[BLE_DEV_ADDR_LEN];
     struct os_mbuf *adv_data;
+    struct os_mbuf *new_adv_data;
     struct os_mbuf *scan_rsp_data;
+    struct os_mbuf *new_scan_rsp_data;
     uint8_t *conn_comp_ev;
     struct ble_npl_event adv_txdone_ev;
     struct ble_ll_sched_item adv_sch;
@@ -136,6 +138,8 @@ struct ble_ll_adv_sm
 #define BLE_LL_ADV_SM_FLAG_ADV_DATA_INCOMPLETE  0x0040
 #define BLE_LL_ADV_SM_FLAG_CONFIGURED           0x0080
 #define BLE_LL_ADV_SM_FLAG_ADV_RPA_TMO          0x0100
+#define BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA         0x0200
+#define BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA    0x0400
 
 #define ADV_DATA_LEN(_advsm) \
                 ((_advsm->adv_data) ? OS_MBUF_PKTLEN(advsm->adv_data) : 0)
@@ -193,31 +197,27 @@ static void ble_ll_adv_sm_stop_timeout(struct ble_ll_adv_sm *advsm);
 static void
 ble_ll_adv_rpa_update(struct ble_ll_adv_sm *advsm)
 {
-    ble_ll_resolv_gen_rpa(advsm->peer_addr, advsm->peer_addr_type,
-                          advsm->adva, 1);
-
-    if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) {
-        ble_ll_resolv_gen_rpa(advsm->peer_addr, advsm->peer_addr_type,
-                              advsm->initiator_addr, 0);
-        if (ble_ll_is_rpa(advsm->initiator_addr, 1)) {
-            advsm->flags |= BLE_LL_ADV_SM_FLAG_RX_ADD;
-        } else {
-            if (advsm->own_addr_type & 1) {
-                advsm->flags |= BLE_LL_ADV_SM_FLAG_RX_ADD;
-            } else {
-                advsm->flags &= ~BLE_LL_ADV_SM_FLAG_RX_ADD;
-            }
-        }
-    }
-
-    /* May have to reset txadd bit */
-    if (ble_ll_is_rpa(advsm->adva, 1)) {
+    if (ble_ll_resolv_gen_rpa(advsm->peer_addr, advsm->peer_addr_type,
+                          advsm->adva, 1)) {
         advsm->flags |= BLE_LL_ADV_SM_FLAG_TX_ADD;
     } else {
         if (advsm->own_addr_type & 1) {
             advsm->flags |= BLE_LL_ADV_SM_FLAG_TX_ADD;
         } else {
             advsm->flags &= ~BLE_LL_ADV_SM_FLAG_TX_ADD;
+        }
+    }
+
+    if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) {
+        if (ble_ll_resolv_gen_rpa(advsm->peer_addr, advsm->peer_addr_type,
+                              advsm->initiator_addr, 0)) {
+            advsm->flags |= BLE_LL_ADV_SM_FLAG_RX_ADD;
+        } else {
+            if (advsm->peer_addr_type & 1) {
+                advsm->flags |= BLE_LL_ADV_SM_FLAG_RX_ADD;
+            } else {
+                advsm->flags &= ~BLE_LL_ADV_SM_FLAG_RX_ADD;
+            }
         }
     }
 }
@@ -398,9 +398,6 @@ static void
 ble_ll_adv_put_aux_ptr(struct ble_ll_adv_sm *advsm, uint32_t offset,
                        uint8_t *dptr)
 {
-    /* in usecs */
-    offset = os_cputime_ticks_to_usecs(offset);
-
     dptr[0] = advsm->adv_secondary_chan;
 
     if (offset > 245700) {
@@ -472,7 +469,7 @@ ble_ll_adv_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_byte)
 
     /* AuxPtr */
     if (AUX_CURRENT(advsm)->sch.enqueued) {
-        offset = AUX_CURRENT(advsm)->start_time - advsm->adv_pdu_start_time;
+        offset = os_cputime_ticks_to_usecs(AUX_CURRENT(advsm)->start_time - advsm->adv_pdu_start_time);
     } else {
         offset = 0;
     }
@@ -503,11 +500,6 @@ ble_ll_adv_aux_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_byte)
     /* It's the same for AUX_ADV_IND and AUX_CHAIN_IND */
     pdu_type = BLE_ADV_PDU_TYPE_AUX_ADV_IND;
 
-    /* Set TxAdd to random if needed. */
-    if (advsm->flags & BLE_LL_ADV_SM_FLAG_TX_ADD) {
-        pdu_type |= BLE_ADV_PDU_HDR_TXADD_RAND;
-    }
-
     /* We do not create scannable PDUs here - this is handled separately */
     adv_mode = 0;
     if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_CONNECTABLE) {
@@ -522,6 +514,12 @@ ble_ll_adv_aux_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_byte)
     dptr += 1;
 
     if (aux->ext_hdr & (1 << BLE_LL_EXT_ADV_ADVA_BIT)) {
+
+        /* Set TxAdd to random if needed. */
+        if (advsm->flags & BLE_LL_ADV_SM_FLAG_TX_ADD) {
+            pdu_type |= BLE_ADV_PDU_HDR_TXADD_RAND;
+        }
+
         memcpy(dptr, advsm->adva, BLE_LL_EXT_ADV_ADVA_SIZE);
         dptr += BLE_LL_EXT_ADV_ADVA_SIZE;
     }
@@ -551,12 +549,10 @@ ble_ll_adv_aux_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_byte)
              */
             offset = 0;
         } else if (advsm->rx_ble_hdr) {
-            offset = advsm->rx_ble_hdr->rem_usecs +
-                     ble_ll_pdu_tx_time_get(12, advsm->sec_phy) + BLE_LL_IFS + 30;
-            offset = AUX_NEXT(advsm)->start_time - advsm->rx_ble_hdr->beg_cputime -
-                     os_cputime_usecs_to_ticks(offset);
+            offset = os_cputime_ticks_to_usecs(AUX_NEXT(advsm)->start_time - advsm->rx_ble_hdr->beg_cputime);
+            offset -= (advsm->rx_ble_hdr->rem_usecs + ble_ll_pdu_tx_time_get(12, advsm->sec_phy) + BLE_LL_IFS);
         } else {
-            offset = AUX_NEXT(advsm)->start_time - aux->start_time;
+            offset = os_cputime_ticks_to_usecs(AUX_NEXT(advsm)->start_time - aux->start_time);
         }
 
         ble_ll_adv_put_aux_ptr(advsm, offset, dptr);
@@ -597,11 +593,6 @@ ble_ll_adv_aux_scannable_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_b
 
     pdu_type = BLE_ADV_PDU_TYPE_AUX_ADV_IND;
 
-    /* Set TxAdd to random if needed. */
-    if (advsm->flags & BLE_LL_ADV_SM_FLAG_TX_ADD) {
-        pdu_type |= BLE_ADV_PDU_HDR_TXADD_RAND;
-    }
-
     ext_hdr_len = &dptr[0];
     ext_hdr = &dptr[1];
     dptr += 2;
@@ -610,11 +601,18 @@ ble_ll_adv_aux_scannable_pdu_make(uint8_t *dptr, void *pducb_arg, uint8_t *hdr_b
     *ext_hdr_len = BLE_LL_EXT_ADV_FLAGS_SIZE;
     *ext_hdr = 0;
 
-    /* AdvA always */
-    *ext_hdr_len += BLE_LL_EXT_ADV_ADVA_SIZE;
-    *ext_hdr |= (1 << BLE_LL_EXT_ADV_ADVA_BIT);
-    memcpy(dptr, advsm->adva, BLE_LL_EXT_ADV_ADVA_SIZE);
-    dptr += BLE_LL_EXT_ADV_ADVA_SIZE;
+    /* AdvA when non anonymous */
+    if (!(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_ANON_ADV)) {
+        /* Set TxAdd to random if needed. */
+        if (advsm->flags & BLE_LL_ADV_SM_FLAG_TX_ADD) {
+            pdu_type |= BLE_ADV_PDU_HDR_TXADD_RAND;
+        }
+
+        *ext_hdr_len += BLE_LL_EXT_ADV_ADVA_SIZE;
+        *ext_hdr |= (1 << BLE_LL_EXT_ADV_ADVA_BIT);
+        memcpy(dptr, advsm->adva, BLE_LL_EXT_ADV_ADVA_SIZE);
+        dptr += BLE_LL_EXT_ADV_ADVA_SIZE;
+    }
 
     /* TargetA only for directed */
     if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) {
@@ -1084,9 +1082,14 @@ ble_ll_adv_aux_scannable_pdu_payload_len(struct ble_ll_adv_sm *advsm)
 {
     uint8_t len;
 
-    /* Flags, AdvA and ADI always */
-    len = BLE_LL_EXT_ADV_HDR_LEN + BLE_LL_EXT_ADV_FLAGS_SIZE +
-          BLE_LL_EXT_ADV_ADVA_SIZE + BLE_LL_EXT_ADV_DATA_INFO_SIZE;
+    /* Flags, ADI always */
+    len = BLE_LL_EXT_ADV_HDR_LEN + BLE_LL_EXT_ADV_FLAGS_SIZE
+            + BLE_LL_EXT_ADV_DATA_INFO_SIZE;
+
+    /* AdvA if not anonymous */
+    if (!(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_ANON_ADV)) {
+        len += BLE_LL_EXT_ADV_ADVA_SIZE;
+    }
 
     /* TargetA only for directed */
     if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) {
@@ -1116,24 +1119,40 @@ ble_ll_adv_aux_calculate(struct ble_ll_adv_sm *advsm,
     aux->aux_data_offset = aux_data_offset;
     aux->aux_data_len = 0;
     aux->payload_len = 0;
+    aux->ext_hdr = 0;
 
     rem_aux_data_len = AUX_DATA_LEN(advsm) - aux_data_offset;
     chainable = !(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_CONNECTABLE);
 
-    /* Flags and ADI */
-    aux->ext_hdr = (1 << BLE_LL_EXT_ADV_DATA_INFO_BIT);
-    hdr_len = BLE_LL_EXT_ADV_HDR_LEN + BLE_LL_EXT_ADV_FLAGS_SIZE +
-              BLE_LL_EXT_ADV_DATA_INFO_SIZE;
+    hdr_len = BLE_LL_EXT_ADV_HDR_LEN + BLE_LL_EXT_ADV_FLAGS_SIZE;
+
+    if (!(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_SCANNABLE)) {
+        /* Flags and ADI */
+        aux->ext_hdr |= (1 << BLE_LL_EXT_ADV_DATA_INFO_BIT);
+        hdr_len += BLE_LL_EXT_ADV_DATA_INFO_SIZE;
+    }
 
     /* AdvA for 1st PDU in chain (i.e. AUX_ADV_IND or AUX_SCAN_RSP) */
-    if (aux_data_offset == 0) {
+    if (aux_data_offset == 0 &&
+        !(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_ANON_ADV)) {
         aux->ext_hdr |= (1 << BLE_LL_EXT_ADV_ADVA_BIT);
         hdr_len += BLE_LL_EXT_ADV_ADVA_SIZE;
     }
 
-    /* TargetA for directed connectable */
-    if ((advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) &&
-        (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_CONNECTABLE)) {
+    /* Note: this function does not calculate AUX_ADV_IND when advertising is
+     * scannable. Instead it is calculated in ble_ll_adv_aux_schedule_first().
+     *
+     * However this function calculates length of AUX_SCAN_RSP and according
+     * to BT 5.0 Vol 6 Part B, 2.3.2.3, TargetA shall not be include there.
+     *
+     * This is why TargetA is added to all directed advertising here unless it
+     * is scannable one.
+     *
+     * Note. TargetA shall not be also in AUX_CHAIN_IND
+     */
+    if (aux_data_offset == 0  &&
+        (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) &&
+            !(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_SCANNABLE)) {
         aux->ext_hdr |= (1 << BLE_LL_EXT_ADV_TARGETA_BIT);
         hdr_len += BLE_LL_EXT_ADV_TARGETA_SIZE;
     }
@@ -1266,7 +1285,16 @@ ble_ll_adv_aux_schedule_first(struct ble_ll_adv_sm *advsm)
                     /* AUX_CONN_RSP */
                     ble_ll_pdu_tx_time_get(14, advsm->sec_phy);
     } else if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_SCANNABLE) {
-        /* Scheduled aux is calculated for AUX_SCAN_RSP, 1st aux is created separately */
+        /* For scannable advertising we need to calculate how much time we
+         * need for AUX_ADV_IND along with AUX_SCAN_REQ, AUX_SCAN_RSP and
+         * IFS in between.
+         *
+         * Note:
+         *  1. aux->payload_len, which calculated by above ble_ll_adv_aux_calulcate(),
+         * contains AUX_SCAN_RSP length.
+         *  2. length of AUX_ADV_IND is calculated by special function:
+         *      ble_ll_adv_aux_scannable_pdu_payload_len()
+         */
         max_usecs = ble_ll_pdu_tx_time_get(ble_ll_adv_aux_scannable_pdu_payload_len(advsm),
                                            advsm->sec_phy) +
                     BLE_LL_IFS +
@@ -1521,6 +1549,40 @@ ble_ll_adv_set_adv_params(uint8_t *cmd)
     return 0;
 }
 
+static void
+ble_ll_adv_update_adv_scan_rsp_data(struct ble_ll_adv_sm *advsm)
+{
+    if (!(advsm->flags & BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA) &&
+                    !(advsm->flags & BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA)) {
+        return;
+    }
+
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
+    if (advsm->aux_active) {
+        return;
+    }
+#endif
+
+    if (advsm->flags & BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA) {
+        if (advsm->new_adv_data) {
+            os_mbuf_free_chain(advsm->adv_data);
+            advsm->adv_data = advsm->new_adv_data;
+            advsm->new_adv_data = NULL;
+        }
+        advsm->flags &= ~BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA;
+    } else if (advsm->flags & BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA) {
+        os_mbuf_free_chain(advsm->scan_rsp_data);
+        advsm->scan_rsp_data = advsm->new_scan_rsp_data;
+        advsm->new_scan_rsp_data = NULL;
+        advsm->flags &= ~BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA;
+    }
+
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
+    /* DID shall be updated when host provides new advertising data */
+    advsm->adi = (advsm->adi & 0xf000) | (rand() & 0x0fff);
+#endif
+}
+
 /**
  * Stop advertising state machine
  *
@@ -1581,6 +1643,9 @@ ble_ll_adv_sm_stop(struct ble_ll_adv_sm *advsm)
 
         /* Disable advertising */
         advsm->adv_enabled = 0;
+
+        /* Check if there is outstanding update */
+        ble_ll_adv_update_adv_scan_rsp_data(advsm);
     }
 }
 
@@ -1824,13 +1889,20 @@ ble_ll_adv_set_enable(uint8_t instance, uint8_t enable, int duration,
 
     advsm = &g_ble_ll_adv_sm[instance];
 
-    if (advsm->flags & BLE_LL_ADV_SM_FLAG_ADV_DATA_INCOMPLETE) {
-        return BLE_ERR_CMD_DISALLOWED;
-    }
-
     rc = BLE_ERR_SUCCESS;
     if (enable == 1) {
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
+        if (advsm->flags & BLE_LL_ADV_SM_FLAG_ADV_DATA_INCOMPLETE) {
+            return BLE_ERR_CMD_DISALLOWED;
+        }
+
+        if (ble_ll_hci_adv_mode_ext() &&
+                (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_SCANNABLE) &&
+                !(advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_LEGACY) &&
+                SCAN_RSP_DATA_LEN(advsm) == 0) {
+            return BLE_ERR_CMD_DISALLOWED;
+        }
+
         /* handle specifics of HD dir adv enabled in legacy way */
         if (duration < 0) {
             if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_HD_DIRECTED) {
@@ -1999,16 +2071,33 @@ ble_ll_adv_set_scan_rsp_data(uint8_t *cmd, uint8_t cmd_len, uint8_t instance,
     new_data = (operation == BLE_HCI_LE_SET_EXT_SCAN_RSP_DATA_OPER_COMPLETE) ||
                (operation == BLE_HCI_LE_SET_EXT_SCAN_RSP_DATA_OPER_FIRST);
 
-    ble_ll_adv_update_data_mbuf(&advsm->scan_rsp_data, new_data,
-                                BLE_SCAN_RSP_DATA_MAX_LEN, cmd + 1, datalen);
-    if (!advsm->scan_rsp_data) {
-        return BLE_ERR_MEM_CAPACITY;
-    }
+    if (advsm->adv_enabled) {
+        if (advsm->new_scan_rsp_data) {
+            advsm->flags &= ~BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA;
+            os_mbuf_free_chain(advsm->new_scan_rsp_data);
+            advsm->new_scan_rsp_data = NULL;
+        }
+
+        ble_ll_adv_update_data_mbuf(&advsm->new_scan_rsp_data, new_data,
+                                    BLE_ADV_DATA_MAX_LEN,
+                                    cmd + 1, datalen);
+        if (!advsm->new_scan_rsp_data) {
+            return BLE_ERR_MEM_CAPACITY;
+        }
+        advsm->flags |= BLE_LL_ADV_SM_FLAG_NEW_SCAN_RSP_DATA;
+    } else {
+        ble_ll_adv_update_data_mbuf(&advsm->scan_rsp_data, new_data,
+                                    BLE_SCAN_RSP_DATA_MAX_LEN,
+                                    cmd + 1, datalen);
+        if (!advsm->scan_rsp_data) {
+            return BLE_ERR_MEM_CAPACITY;
+        }
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
-    /* DID shall be updated when host provides new scan response data */
-    advsm->adi = (advsm->adi & 0xf000) | (rand() & 0x0fff);
+        /* DID shall be updated when host provides new scan response data */
+        advsm->adi = (advsm->adi & 0xf000) | (rand() & 0x0fff);
 #endif
+    }
 
     return BLE_ERR_SUCCESS;
 }
@@ -2048,7 +2137,9 @@ ble_ll_adv_set_adv_data(uint8_t *cmd, uint8_t cmd_len, uint8_t instance,
     /* check if type of advertising support adv data */
     if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_LEGACY) {
         if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_DIRECTED) {
-            return BLE_ERR_INV_HCI_CMD_PARMS;
+            if (ble_ll_hci_adv_mode_ext()) {
+                return BLE_ERR_INV_HCI_CMD_PARMS;
+            }
         }
     } else {
         if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_SCANNABLE) {
@@ -2122,16 +2213,33 @@ ble_ll_adv_set_adv_data(uint8_t *cmd, uint8_t cmd_len, uint8_t instance,
     new_data = (operation == BLE_HCI_LE_SET_EXT_ADV_DATA_OPER_COMPLETE) ||
                (operation == BLE_HCI_LE_SET_EXT_ADV_DATA_OPER_FIRST);
 
-    ble_ll_adv_update_data_mbuf(&advsm->adv_data, new_data, BLE_ADV_DATA_MAX_LEN,
-                                cmd + 1, datalen);
-    if (!advsm->adv_data) {
-        return BLE_ERR_MEM_CAPACITY;
-    }
+    if (advsm->adv_enabled) {
+        if (advsm->new_adv_data) {
+            advsm->flags &= ~BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA;
+            os_mbuf_free_chain(advsm->new_adv_data);
+            advsm->new_adv_data = NULL;
+        }
+
+        ble_ll_adv_update_data_mbuf(&advsm->new_adv_data, new_data,
+                                    BLE_ADV_DATA_MAX_LEN,
+                                    cmd + 1, datalen);
+        if (!advsm->new_adv_data) {
+            return BLE_ERR_MEM_CAPACITY;
+        }
+        advsm->flags |= BLE_LL_ADV_SM_FLAG_NEW_ADV_DATA;
+    } else {
+        ble_ll_adv_update_data_mbuf(&advsm->adv_data, new_data,
+                                    BLE_ADV_DATA_MAX_LEN,
+                                    cmd + 1, datalen);
+        if (!advsm->adv_data) {
+            return BLE_ERR_MEM_CAPACITY;
+        }
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
-    /* DID shall be updated when host provides new advertising data */
-    advsm->adi = (advsm->adi & 0xf000) | (rand() & 0x0fff);
+        /* DID shall be updated when host provides new advertising data */
+        advsm->adi = (advsm->adi & 0xf000) | (rand() & 0x0fff);
 #endif
+        }
 
     return BLE_ERR_SUCCESS;
 }
@@ -2316,7 +2424,14 @@ ble_ll_adv_ext_set_param(uint8_t *cmdbuf, uint8_t *rspbuf, uint8_t *rsplen)
         advsm->adv_txpwr = ble_phy_txpower_round(tx_power);
     }
 
-    advsm->own_addr_type = own_addr_type;
+    if (!(props & BLE_HCI_LE_SET_EXT_ADV_PROP_LEGACY) &&
+         (props & BLE_HCI_LE_SET_EXT_ADV_PROP_ANON_ADV)) {
+        /* For anonymous don't care about address type */
+        advsm->own_addr_type = 0;
+    } else {
+        advsm->own_addr_type = own_addr_type;
+    }
+
     advsm->peer_addr_type = peer_addr_type;
     advsm->adv_filter_policy = adv_filter_policy;
     advsm->adv_chanmask = adv_chanmask;
@@ -2568,6 +2683,34 @@ ble_ll_adv_clear_all(void)
 }
 #endif
 
+/**
+ * Says whether the specified address is already connected or not.
+ * @param   [in]    addr        The peer address.
+ * @param   [in]    addr_type   Public address (0) or random address (1).
+ * @return  Return 1 if already connected, 0 otherwise.
+ */
+static int
+ble_ll_adv_already_connected(const uint8_t* addr, uint8_t addr_type)
+{
+    struct ble_ll_conn_sm *connsm;
+
+    /* extracted from ble_ll_conn_slave_start function */
+    SLIST_FOREACH(connsm, &g_ble_ll_conn_active_list, act_sle) {
+        if (!memcmp(&connsm->peer_addr, addr, BLE_DEV_ADDR_LEN)) {
+            if (addr_type == BLE_ADDR_RANDOM) {
+                if (connsm->peer_addr_type & 1) {
+                    return 1;
+                }
+            } else {
+                if ((connsm->peer_addr_type & 1) == 0) {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
 
 /**
  * Called when the LL receives a scan request or connection request
@@ -2595,6 +2738,9 @@ ble_ll_adv_rx_req(uint8_t pdu_type, struct os_mbuf *rxpdu)
     struct ble_ll_adv_sm *advsm;
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
     struct aux_conn_rsp_data rsp_data;
+#endif
+#if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY) == 1)
+    struct ble_ll_resolv_entry *rl;
 #endif
 
     /* See if adva in the request (scan or connect) matches what we sent */
@@ -2625,17 +2771,28 @@ ble_ll_adv_rx_req(uint8_t pdu_type, struct os_mbuf *rxpdu)
     resolved = 0;
 
 #if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PRIVACY) == 1)
-    if (ble_ll_is_rpa(peer, txadd) && ble_ll_resolv_enabled()) {
-        advsm->adv_rpa_index = ble_hw_resolv_list_match();
-        if (advsm->adv_rpa_index >= 0) {
-            ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_RESOLVED;
-            if (chk_wl) {
-                peer = g_ble_ll_resolv_list[advsm->adv_rpa_index].rl_identity_addr;
-                peer_addr_type = g_ble_ll_resolv_list[advsm->adv_rpa_index].rl_addr_type;
-                resolved = 1;
+    rl = NULL;
+    if (ble_ll_resolv_enabled()) {
+        if (ble_ll_is_rpa(peer, txadd)) {
+            advsm->adv_rpa_index = ble_hw_resolv_list_match();
+            if (advsm->adv_rpa_index >= 0) {
+                ble_hdr->rxinfo.flags |= BLE_MBUF_HDR_F_RESOLVED;
+                rl = &g_ble_ll_resolv_list[advsm->adv_rpa_index];
+                if (chk_wl) {
+                    peer = rl->rl_identity_addr;
+                    peer_addr_type = rl->rl_addr_type;
+                    resolved = 1;
+                }
+            } else {
+                if (chk_wl) {
+                    return -1;
+                }
             }
         } else {
-            if (chk_wl) {
+            /* Verify privacy mode */
+            rl = ble_ll_resolv_list_find(peer, peer_addr_type);
+            if (rl && (rl->rl_priv_mode == BLE_HCI_PRIVACY_NETWORK) &&
+                                ble_ll_resolv_irk_nonzero(rl->rl_peer_irk)) {
                 return -1;
             }
         }
@@ -2686,6 +2843,11 @@ ble_ll_adv_rx_req(uint8_t pdu_type, struct os_mbuf *rxpdu)
             STATS_INC(ble_ll_stats, scan_rsp_txg);
         }
     } else if (pdu_type == BLE_ADV_PDU_TYPE_AUX_CONNECT_REQ) {
+        /* See if the device is already connected */
+        if (ble_ll_adv_already_connected(peer, peer_addr_type)) {
+            return -1;
+        }
+
         /*
          * Only accept connect requests from the desired address if we
          * are doing directed advertising
@@ -2788,6 +2950,9 @@ ble_ll_adv_conn_req_rxd(uint8_t *rxbuf, struct ble_mbuf_hdr *hdr,
         if (resolved) {
             /* Retain the resolvable private address that we received. */
             memcpy(advsm->adv_rpa, inita, BLE_DEV_ADDR_LEN);
+
+            /* Update resolving list with current peer RPA */
+            ble_ll_resolv_set_peer_rpa(advsm->adv_rpa_index, inita);
 
             /*
              * Overwrite received inita with identity address since that
@@ -3066,6 +3231,8 @@ ble_ll_adv_done(struct ble_ll_adv_sm *advsm)
 
     assert(advsm->adv_enabled);
 
+    ble_ll_adv_update_adv_scan_rsp_data(advsm);
+
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
     if (advsm->props & BLE_HCI_LE_SET_EXT_ADV_PROP_LEGACY) {
         /* stop advertising this was due to transmitting connection response */
@@ -3291,6 +3458,7 @@ ble_ll_adv_sec_done(struct ble_ll_adv_sm *advsm)
     }
 
     advsm->aux_active = 0;
+    ble_ll_adv_update_adv_scan_rsp_data(advsm);
     ble_ll_adv_reschedule_event(advsm);
 }
 
@@ -3394,11 +3562,13 @@ ble_ll_adv_send_conn_comp_ev(struct ble_ll_conn_sm *connsm,
 uint8_t *
 ble_ll_adv_get_local_rpa(struct ble_ll_adv_sm *advsm)
 {
-    uint8_t *rpa;
+    uint8_t *rpa = NULL;
 
-    rpa = NULL;
     if (advsm->own_addr_type > BLE_HCI_ADV_OWN_ADDR_RANDOM) {
-        rpa = advsm->adva;
+        if ((advsm->flags & BLE_LL_ADV_SM_FLAG_TX_ADD) &&
+                                    ble_ll_is_rpa(advsm->adva, 1)) {
+            rpa = advsm->adva;
+        }
     }
 
     return rpa;

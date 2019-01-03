@@ -17,13 +17,19 @@
  * under the License.
  */
 
-#ifndef _NPL_OSAL_H
-#define _NPL_OSAL_H
+#ifndef __CONSOLE_H__
+#define __CONSOLE_H__
 
-#include "os_types.h"
+#include <stdio.h>
 
-#include "nimble/nimble_npl.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#include "os/os.h"
+#define console_printf(_fmt, ...) printf(_fmt, ##__VA_ARGS__)
 
-#endif // _NPL_OSAL_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __CONSOLE_H__ */

@@ -31,6 +31,7 @@
 #include "controller/ble_ll.h"
 #include "nrfx.h"
 #if MYNEWT
+#include "mcu/nrf52_clock.h"
 #include "mcu/cmsis_nvic.h"
 #include "hal/hal_gpio.h"
 #else
@@ -151,13 +152,13 @@ static const uint16_t g_ble_phy_mode_pkt_start_off[BLE_PHY_NUM_MODE] = { 376, 40
 #define BLE_PHY_T_TXENFAST      (XCVR_TX_RADIO_RAMPUP_USECS)
 #define BLE_PHY_T_RXENFAST      (XCVR_RX_RADIO_RAMPUP_USECS)
 /* delay between EVENTS_READY and start of tx */
-static const uint8_t g_ble_phy_t_txdelay[BLE_PHY_NUM_MODE] = { 5, 3, 3, 5 };
+static const uint8_t g_ble_phy_t_txdelay[BLE_PHY_NUM_MODE] = { 5, 4, 3, 5 };
 /* delay between EVENTS_END and end of txd packet */
-static const uint8_t g_ble_phy_t_txenddelay[BLE_PHY_NUM_MODE] = { 9, 3, 3, 3 };
+static const uint8_t g_ble_phy_t_txenddelay[BLE_PHY_NUM_MODE] = { 9, 4, 3, 3 };
 /* delay between rxd access address (w/ TERM1 for coded) and EVENTS_ADDRESS */
-static const uint8_t g_ble_phy_t_rxaddrdelay[BLE_PHY_NUM_MODE] = { 17, 7, 3, 17 };
+static const uint8_t g_ble_phy_t_rxaddrdelay[BLE_PHY_NUM_MODE] = { 17, 6, 2, 17 };
 /* delay between end of rxd packet and EVENTS_END */
-static const uint8_t g_ble_phy_t_rxenddelay[BLE_PHY_NUM_MODE] = { 27, 7, 3, 22 };
+static const uint8_t g_ble_phy_t_rxenddelay[BLE_PHY_NUM_MODE] = { 27, 6, 2, 22 };
 
 /* Statistics */
 STATS_SECT_START(ble_phy_stats)
@@ -245,6 +246,19 @@ struct nrf_ccm_data
 } __attribute__((packed));
 
 struct nrf_ccm_data g_nrf_ccm_data;
+#endif
+
+#ifdef NRF52
+static void
+ble_phy_apply_errata_102_106_107(void)
+{
+    /* [102] RADIO: PAYLOAD/END events delayed or not triggered after ADDRESS
+     * [106] RADIO: Higher CRC error rates for some access addresses
+     * [107] RADIO: Immediate address match for access addresses containing MSBs 0x00
+     */
+    *(volatile uint32_t *)0x40001774 = ((*(volatile uint32_t *)0x40001774) &
+                         0xfffffffe) | 0x01000000;
+}
 #endif
 
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
@@ -633,6 +647,13 @@ ble_phy_wfr_enable(int txrx, uint8_t tx_phy_mode, uint32_t wfr_usecs)
         end_time += g_ble_phy_t_txenddelay[tx_phy_mode];
         /* Wait a bit longer due to allowed active clock accuracy */
         end_time += 2;
+        /*
+         * It's possible that we'll capture PDU start time at the end of timer
+         * cycle and since wfr expires at the beginning of calculated timer
+         * cycle it can be almost 1 usec too early. Let's compensate for this
+         * by waiting 1 usec more.
+         */
+        end_time += 1;
 #if MYNEWT_VAL(BLE_PHY_CODED_RX_IFS_EXTRA_MARGIN) > 0
         if ((phy == BLE_PHY_MODE_CODED_125KBPS) ||
                                     (phy == BLE_PHY_MODE_CODED_500KBPS)) {
@@ -1331,20 +1352,14 @@ ble_phy_init(void)
     g_ble_phy_data.phy_txtorx_phy_mode = BLE_PHY_MODE_1M;
 
 #if !defined(BLE_XCVR_RFCLK)
-    uint32_t os_tmo;
+    /* BLE wants the HFXO on all the time in this case */
+    ble_phy_rfclk_enable();
 
-    /* Make sure HFXO is started */
-    NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-    NRF_CLOCK->TASKS_HFCLKSTART = 1;
-    os_tmo = os_time_get() + (5 * (1000 / OS_TICKS_PER_SEC));
-    while (1) {
-        if (NRF_CLOCK->EVENTS_HFCLKSTARTED) {
-            break;
-        }
-        if ((int32_t)(os_time_get() - os_tmo) > 0) {
-            return BLE_PHY_ERR_INIT;
-        }
-    }
+    /*
+     * XXX: I do not think we need to wait for settling time here since
+     * we will probably not use the radio for longer than the settling time
+     * and it will only degrade performance. Might want to wait here though.
+     */
 #endif
 
     /* Set phy channel to an invalid channel so first set channel works */
@@ -1428,7 +1443,7 @@ ble_phy_init(void)
 #if MYNEWT
     NVIC_SetVector(RADIO_IRQn, (uint32_t)ble_phy_isr);
 #else
-    ble_npl_hw_set_isr(RADIO_IRQn, (uint32_t)ble_phy_isr);
+    ble_npl_hw_set_isr(RADIO_IRQn, ble_phy_isr);
 #endif
     NVIC_EnableIRQ(RADIO_IRQn);
 
@@ -1814,6 +1829,10 @@ ble_phy_set_access_addr(uint32_t access_addr)
 
     g_ble_phy_data.phy_access_address = access_addr;
 
+#ifdef NRF52
+    ble_phy_apply_errata_102_106_107();
+#endif
+
     return 0;
 }
 
@@ -2012,16 +2031,23 @@ void ble_phy_disable_dtm(void)
     NRF_RADIO->PCNF1 |= RADIO_PCNF1_WHITEEN_Msk;
 }
 #endif
-#ifdef BLE_XCVR_RFCLK
+
 void
 ble_phy_rfclk_enable(void)
 {
+#if MYNEWT
+    nrf52_clock_hfxo_request();
+#else
     NRF_CLOCK->TASKS_HFCLKSTART = 1;
+#endif
 }
 
 void
 ble_phy_rfclk_disable(void)
 {
+#if MYNEWT
+    nrf52_clock_hfxo_release();
+#else
     NRF_CLOCK->TASKS_HFCLKSTOP = 1;
-}
 #endif
+}

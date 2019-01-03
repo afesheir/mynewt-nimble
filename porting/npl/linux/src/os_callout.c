@@ -25,7 +25,7 @@
 #include <time.h>
 #include <signal.h>
 
-#include "npl_osal.h"
+#include "nimble/nimble_npl.h"
 
 static void
 ble_npl_callout_timer_cb(union sigval sv)
@@ -39,7 +39,6 @@ ble_npl_callout_timer_cb(union sigval sv)
         c->c_ev.ev_cb(&c->c_ev);
     }
 }
-
 
 void ble_npl_callout_init(struct ble_npl_callout *c, 
                           struct ble_npl_eventq *evq,
@@ -129,4 +128,31 @@ ble_npl_time_t
 ble_npl_callout_get_ticks(struct ble_npl_callout *co)
 {
     return co->c_ticks;
+}
+
+void
+ble_npl_callout_set_arg(struct ble_npl_callout *co, void *arg)
+{
+    co->c_ev.ev_arg = arg;
+}
+
+uint32_t
+ble_npl_callout_remaining_ticks(struct ble_npl_callout *co,
+                                ble_npl_time_t now)
+{
+    ble_npl_time_t rt;
+    uint32_t exp;
+
+    struct itimerspec its;
+    timer_gettime(co->c_timer, &its);
+
+    exp = its.it_value.tv_sec * 1000;
+
+    if (exp > now) {
+        rt = exp - now;
+    } else {
+        rt = 0;
+    }
+
+    return rt;
 }

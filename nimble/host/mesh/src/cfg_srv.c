@@ -725,7 +725,7 @@ static void beacon_set(struct bt_mesh_model *model,
 		}
 	} else {
 		BT_WARN("Invalid Config Beacon value 0x%02x", buf->om_data[0]);
-		return;
+		goto done;
 	}
 
 	bt_mesh_model_msg_init(msg, OP_BEACON_STATUS);
@@ -735,6 +735,7 @@ static void beacon_set(struct bt_mesh_model *model,
 		BT_ERR("Unable to send Config Beacon Status response");
 	}
 
+done:
 	os_mbuf_free_chain(msg);
 
 }
@@ -1013,7 +1014,7 @@ static void relay_set(struct bt_mesh_model *model,
 		       cfg->relay, change ? "changed" : "not changed",
 		       cfg->relay_retransmit,
 		       BT_MESH_TRANSMIT_COUNT(cfg->relay_retransmit),
-		       BT_MESH_TRANSMIT_INT(cfg->relay_retransmit))
+		       BT_MESH_TRANSMIT_INT(cfg->relay_retransmit));
 
 		sub = bt_mesh_subnet_get(cfg->hb_pub.net_idx);
 		if ((cfg->hb_pub.feat & BT_MESH_FEAT_RELAY) && sub && change) {
@@ -1698,7 +1699,7 @@ static void mod_sub_get(struct bt_mesh_model *model,
 	addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(addr)) {
 		BT_WARN("Prohibited element address");
-		return;
+		goto done;
 	}
 
 	id = net_buf_simple_pull_le16(buf);
@@ -1739,6 +1740,7 @@ send_list:
 		BT_ERR("Unable to send Model Subscription List");
 	}
 
+done:
 	os_mbuf_free_chain(msg);
 
 }
@@ -1758,7 +1760,7 @@ static void mod_sub_get_vnd(struct bt_mesh_model *model,
 	addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(addr)) {
 		BT_WARN("Prohibited element address");
-		return;
+		goto done;
 	}
 
 	company = net_buf_simple_pull_le16(buf);
@@ -1803,6 +1805,7 @@ send_list:
 		BT_ERR("Unable to send Vendor Model Subscription List");
 	}
 
+done:
 	os_mbuf_free_chain(msg);
 
 }
@@ -2534,7 +2537,7 @@ static void mod_app_bind(struct bt_mesh_model *model,
 	elem_addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(elem_addr)) {
 		BT_WARN("Prohibited element address");
-		return;
+		goto done;
 	}
 
 	key_app_idx = net_buf_simple_pull_le16(buf);
@@ -2576,6 +2579,7 @@ send_status:
 		BT_ERR("Unable to send Model App Bind Status response");
 	}
 
+done:
     os_mbuf_free_chain(msg);
 
 }
@@ -2594,7 +2598,7 @@ static void mod_app_unbind(struct bt_mesh_model *model,
 	elem_addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(elem_addr)) {
 		BT_WARN("Prohibited element address");
-		return;
+		goto done;
 	}
 
 	key_app_idx = net_buf_simple_pull_le16(buf);
@@ -2629,6 +2633,7 @@ send_status:
 		BT_ERR("Unable to send Model App Unbind Status response");
 	}
 
+done:
     os_mbuf_free_chain(msg);
 }
 
@@ -2648,7 +2653,7 @@ static void mod_app_get(struct bt_mesh_model *model,
 	elem_addr = net_buf_simple_pull_le16(buf);
 	if (!BT_MESH_ADDR_IS_UNICAST(elem_addr)) {
 		BT_WARN("Prohibited element address");
-		return;
+		goto done;
 	}
 
 	mod_id = buf->om_data;
@@ -2701,6 +2706,7 @@ send_list:
 		BT_ERR("Unable to send Model Application List message");
 	}
 
+done:
 	os_mbuf_free_chain(msg);
 }
 
@@ -3146,15 +3152,11 @@ static void hb_sub_send_status(struct bt_mesh_model *model,
 	net_buf_simple_add_le16(msg, cfg->hb_sub.src);
 	net_buf_simple_add_le16(msg, cfg->hb_sub.dst);
 
-	if (cfg->hb_sub.src == BT_MESH_ADDR_UNASSIGNED ||
-	    cfg->hb_sub.dst == BT_MESH_ADDR_UNASSIGNED) {
-		memset(net_buf_simple_add(msg, 4), 0, 4);
-	} else {
-		net_buf_simple_add_u8(msg, hb_log(period));
-		net_buf_simple_add_u8(msg, hb_log(cfg->hb_sub.count));
-		net_buf_simple_add_u8(msg, cfg->hb_sub.min_hops);
-		net_buf_simple_add_u8(msg, cfg->hb_sub.max_hops);
-	}
+	net_buf_simple_add_u8(msg, hb_log(period));
+	net_buf_simple_add_u8(msg, hb_log(cfg->hb_sub.count));
+	net_buf_simple_add_u8(msg, cfg->hb_sub.min_hops);
+	net_buf_simple_add_u8(msg, cfg->hb_sub.max_hops);
+
 
 	if (bt_mesh_model_send(model, ctx, msg, NULL, NULL)) {
 		BT_ERR("Unable to send Heartbeat Subscription Status");
@@ -3211,12 +3213,17 @@ static void heartbeat_sub_set(struct bt_mesh_model *model,
 	if (sub_src == BT_MESH_ADDR_UNASSIGNED ||
 	    sub_dst == BT_MESH_ADDR_UNASSIGNED ||
 	    sub_period == 0x00) {
-		/* Setting the same addresses with zero period should retain
-		 * the addresses according to MESH/NODE/CFG/HBS/BV-02-C.
+		/* Only an explicit address change to unassigned should
+		 * trigger clearing of the values according to
+		 * MESH/NODE/CFG/HBS/BV-02-C.
 		 */
-		if (cfg->hb_sub.src != sub_src || cfg->hb_sub.dst != sub_dst) {
+		if (sub_src == BT_MESH_ADDR_UNASSIGNED ||
+		    sub_dst == BT_MESH_ADDR_UNASSIGNED) {
 			cfg->hb_sub.src = BT_MESH_ADDR_UNASSIGNED;
 			cfg->hb_sub.dst = BT_MESH_ADDR_UNASSIGNED;
+			cfg->hb_sub.min_hops = BT_MESH_TTL_MAX;
+			cfg->hb_sub.max_hops = 0;
+			cfg->hb_sub.count = 0;
 		}
 
 		period_ms = 0;
@@ -3241,6 +3248,13 @@ static void heartbeat_sub_set(struct bt_mesh_model *model,
 	}
 
 	hb_sub_send_status(model, ctx, STATUS_SUCCESS);
+
+	/* MESH/NODE/CFG/HBS/BV-01-C expects the MinHops to be 0x7f after
+	 * disabling subscription, but 0x00 for subsequent Get requests.
+	 */
+	if (!period_ms) {
+		cfg->hb_sub.min_hops = 0;
+	}
 }
 
 const struct bt_mesh_model_op bt_mesh_cfg_srv_op[] = {

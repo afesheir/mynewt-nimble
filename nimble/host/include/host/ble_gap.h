@@ -594,7 +594,7 @@ struct ble_gap_event {
             /** The handle of the relevant connection. */
             uint16_t conn_handle;
 
-            /** The handle of the relevant characterstic value. */
+            /** The handle of the relevant characteristic value. */
             uint16_t attr_handle;
 
             /**
@@ -737,6 +737,22 @@ typedef int ble_gap_event_fn(struct ble_gap_event *event, void *arg);
 int ble_gap_conn_find(uint16_t handle, struct ble_gap_conn_desc *out_desc);
 
 /**
+ * Searches for a connection with a peer with the specified address.
+ * If a matching connection is found, the supplied connection descriptor
+ * is filled correspondingly.
+ *
+ * @param addr      The ble address of a connected peer device to search for.
+ * @param out_desc  On success, this is populated with information relating to
+ *                  the matching connection.  Pass NULL if you don't need this
+ *                  information.
+ *
+ * @return          0 on success, BLE_HS_ENOTCONN if no matching connection was
+ *                  found.
+ */
+int ble_gap_conn_find_by_addr(const ble_addr_t *addr,
+                              struct ble_gap_conn_desc *out_desc);
+
+/**
  * Configures a connection to use the specified GAP event callback.  A
  * connection's GAP event callback is first specified when the connection is
  * created, either via advertising or initiation.  This function replaces the
@@ -762,7 +778,7 @@ int ble_gap_set_event_cb(uint16_t conn_handle,
  *                         - BLE_OWN_ADDR_RANDOM
  *                         - BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT
  *                         - BLE_OWN_ADDR_RPA_RANDOM_DEFAULT
- * @param direct_addr   The peer's address for directed advertising. his
+ * @param direct_addr   The peer's address for directed advertising. This
  *                      parameter shall be non-NULL if directed advertising is
  *                      being used.
  * @param duration_ms   The duration of the advertisement procedure. On
@@ -789,6 +805,18 @@ int ble_gap_adv_start(uint8_t own_addr_type, const ble_addr_t *direct_addr,
  * Stops the currently-active advertising procedure.  A success return
  * code indicates that advertising has been fully aborted and a new advertising
  * procedure can be initiated immediately.
+ *
+ * NOTE: If the caller is running in the same task as the NimBLE host, or if it
+ * is running in a higher priority task than that of the host, care must be
+ * taken when restarting advertising.  Under these conditions, the following is
+ * *not* a reliable method to restart advertising:
+ *     ble_gap_adv_stop()
+ *     ble_gap_adv_start()
+ *
+ * Instead, the call to `ble_gap_adv_start()` must be made in a separate event
+ * context.  That is, `ble_gap_adv_start()` must be called asynchronously by
+ * enqueueing an event on the current task's event queue.  See
+ * https://github.com/apache/mynewt-nimble/pull/211 for more information.
  *
  * @return  0 on success, BLE_HS_EALREADY if there is no active advertising
  *          procedure, other error code on failure.
@@ -1181,6 +1209,34 @@ int ble_gap_encryption_initiate(uint16_t conn_handle, const uint8_t *ltk,
  */
 int ble_gap_conn_rssi(uint16_t conn_handle, int8_t *out_rssi);
 
+/**
+ * Unpairs a device with the specified address. The keys related to that peer
+ * device are removed from storage and peer address is removed from the resolve
+ * list from the controller. If a peer is connected, the connection is terminated.
+ *
+ * @param peer_addr             Address of the device to be unpaired
+ *
+ * @return                      0 on success;
+ *                              A BLE host HCI return code if the controller
+ *                                  rejected the request;
+ *                              A BLE host core return code on unexpected
+ *                                  error.
+ */
+int ble_gap_unpair(const ble_addr_t *peer_addr);
+
+/**
+ * Unpairs the oldest bonded peer device. The keys related to that peer
+ * device are removed from storage and peer address is removed from the resolve
+ * list from the controller. If a peer is connected, the connection is terminated.
+ *
+ * @return                      0 on success;
+ *                              A BLE host HCI return code if the controller
+ *                                  rejected the request;
+ *                              A BLE host core return code on unexpected
+ *                                  error.
+ */
+int ble_gap_unpair_oldest_peer(void);
+
 #define BLE_GAP_PRIVATE_MODE_NETWORK        0
 #define BLE_GAP_PRIVATE_MODE_DEVICE         1
 int ble_gap_set_priv_mode(const ble_addr_t *peer_addr, uint8_t priv_mode);
@@ -1202,6 +1258,45 @@ int ble_gap_set_prefered_default_le_phy(uint8_t tx_phys_mask,
 #define BLE_GAP_LE_PHY_CODED_S8             2
 int ble_gap_set_prefered_le_phy(uint16_t conn_handle, uint8_t tx_phys_mask,
                                 uint8_t rx_phys_mask, uint16_t phy_opts);
+
+/**
+ * Event listener structure
+ *
+ * This should be used as an opaque structure and not modified manually.
+ */
+struct ble_gap_event_listener {
+    ble_gap_event_fn *fn;
+    void *arg;
+    SLIST_ENTRY(ble_gap_event_listener) link;
+};
+
+/**
+ * Registers listener for GAP events
+ *
+ * On success listener structure will be initialized automatically and does not
+ * need to be initialized prior to calling this function. To change callback
+ * and/or argument unregister listener first and register it again.
+ *
+ * @param listener      Listener structure
+ * @param fn            Callback function
+ * @param arg           Callback argument
+ *
+ * @return              0 on success
+ *                      BLE_HS_EINVAL if no callback is specified
+ *                      BLE_HS_EALREADY if listener is already registered
+ */
+int ble_gap_event_listener_register(struct ble_gap_event_listener *listener,
+                                    ble_gap_event_fn *fn, void *arg);
+
+/**
+ * Unregisters listener for GAP events
+ *
+ * @param listener      Listener structure
+ *
+ * @return              0 on success
+ *                      BLE_HS_ENOENT if listener was not registered
+ */
+int ble_gap_event_listener_unregister(struct ble_gap_event_listener *listener);
 
 #if MYNEWT_VAL(BLE_MESH)
 int ble_gap_mesh_cb_register(ble_gap_event_fn *cb, void *cb_arg);

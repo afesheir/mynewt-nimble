@@ -124,6 +124,7 @@ ble_l2cap_event_coc_received_data(struct ble_l2cap_chan *chan,
     struct ble_l2cap_event event;
 
     event.type = BLE_L2CAP_EVENT_COC_DATA_RECEIVED;
+    event.receive.conn_handle = chan->conn_handle;
     event.receive.chan = chan;
     event.receive.sdu_rx = om;
 
@@ -497,6 +498,46 @@ ble_l2cap_coc_send(struct ble_l2cap_chan *chan, struct os_mbuf *sdu_tx)
     tx->sdu = sdu_tx;
 
     return ble_l2cap_coc_continue_tx(chan);
+}
+
+int
+ble_l2cap_get_scid(struct ble_l2cap_chan *chan)
+{
+    if (!chan) {
+        return 0;
+    }
+
+    return chan->scid;
+}
+
+int
+ble_l2cap_get_dcid(struct ble_l2cap_chan *chan)
+{
+    if (!chan) {
+        return 0;
+    }
+
+    return chan->dcid;
+}
+
+int
+ble_l2cap_get_our_mtu(struct ble_l2cap_chan *chan)
+{
+    if (!chan) {
+        return 0;
+    }
+
+    return chan->my_mtu;
+}
+
+int
+ble_l2cap_get_peer_mtu(struct ble_l2cap_chan *chan)
+{
+    if (!chan) {
+        return 0;
+    }
+
+    return chan->peer_mtu;
 }
 
 int

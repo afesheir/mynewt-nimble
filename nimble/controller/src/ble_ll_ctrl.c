@@ -357,14 +357,99 @@ conn_param_pdu_exit:
 }
 
 /**
+ * Called to make a connection update request LL control PDU
+ *
+ * Context: Link Layer
+ *
+ * @param connsm
+ * @param rsp
+ */
+static void
+ble_ll_ctrl_conn_upd_make(struct ble_ll_conn_sm *connsm, uint8_t *pyld,
+                          struct ble_ll_conn_params *cp)
+{
+    uint16_t instant;
+    uint32_t dt;
+    uint32_t num_old_ce;
+    uint32_t new_itvl_usecs;
+    uint32_t old_itvl_usecs;
+    struct hci_conn_update *hcu;
+    struct ble_ll_conn_upd_req *req;
+
+    /*
+     * Set instant. We set the instant to the current event counter plus
+     * the amount of slave latency as the slave may not be listening
+     * at every connection interval and we are not sure when the connect
+     * request will actually get sent. We add one more event plus the
+     * minimum as per the spec of 6 connection events.
+     */
+    instant = connsm->event_cntr + connsm->slave_latency + 6 + 1;
+
+    /*
+     * XXX: This should change in the future, but for now we will just
+     * start the new instant at the same anchor using win offset 0.
+     */
+    /* Copy parameters in connection update structure */
+    hcu = &connsm->conn_param_req;
+    req = &connsm->conn_update_req;
+    if (cp) {
+        /* XXX: so we need to make the new anchor point some time away
+         * from txwinoffset by some amount of msecs. Not sure how to do
+           that here. We dont need to, but we should. */
+        /* Calculate offset from requested offsets (if any) */
+        if (cp->offset0 != 0xFFFF) {
+            new_itvl_usecs = cp->interval_max * BLE_LL_CONN_ITVL_USECS;
+            old_itvl_usecs = connsm->conn_itvl * BLE_LL_CONN_ITVL_USECS;
+            if ((int16_t)(cp->ref_conn_event_cnt - instant) >= 0) {
+                num_old_ce = cp->ref_conn_event_cnt - instant;
+                dt = old_itvl_usecs * num_old_ce;
+                dt += (cp->offset0 * BLE_LL_CONN_ITVL_USECS);
+                dt = dt % new_itvl_usecs;
+            } else {
+                num_old_ce = instant - cp->ref_conn_event_cnt;
+                dt = old_itvl_usecs * num_old_ce;
+                dt -= (cp->offset0 * BLE_LL_CONN_ITVL_USECS);
+                dt = dt % new_itvl_usecs;
+                dt = new_itvl_usecs - dt;
+            }
+            req->winoffset = dt / BLE_LL_CONN_TX_WIN_USECS;
+        } else {
+            req->winoffset = 0;
+        }
+        req->interval = cp->interval_max;
+        req->timeout = cp->timeout;
+        req->latency = cp->latency;
+        req->winsize = 1;
+    } else {
+        req->interval = hcu->conn_itvl_max;
+        req->timeout = hcu->supervision_timeout;
+        req->latency = hcu->conn_latency;
+        req->winoffset = 0;
+        req->winsize = connsm->tx_win_size;
+    }
+    req->instant = instant;
+
+    /* XXX: make sure this works for the connection parameter request proc. */
+    pyld[0] = req->winsize;
+    put_le16(pyld + 1, req->winoffset);
+    put_le16(pyld + 3, req->interval);
+    put_le16(pyld + 5, req->latency);
+    put_le16(pyld + 7, req->timeout);
+    put_le16(pyld + 9, instant);
+
+    /* Set flag in state machine to denote we have scheduled an update */
+    connsm->csmflags.cfbit.conn_update_sched = 1;
+}
+
+/**
  * Called to process and UNKNOWN_RSP LL control packet.
  *
  * Context: Link Layer Task
  *
  * @param dptr
  */
-static void
-ble_ll_ctrl_proc_unk_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
+static int
+ble_ll_ctrl_proc_unk_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr, uint8_t *rspdata)
 {
     uint8_t ctrl_proc;
     uint8_t opcode;
@@ -376,15 +461,24 @@ ble_ll_ctrl_proc_unk_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
     switch (opcode) {
     case BLE_LL_CTRL_LENGTH_REQ:
         ctrl_proc = BLE_LL_CTRL_PROC_DATA_LEN_UPD;
+        BLE_LL_CONN_CLEAR_FEATURE(connsm, BLE_LL_FEAT_DATA_LEN_EXT);
         break;
     case BLE_LL_CTRL_CONN_UPDATE_IND:
         ctrl_proc = BLE_LL_CTRL_PROC_CONN_UPDATE;
         break;
     case BLE_LL_CTRL_SLAVE_FEATURE_REQ:
         ctrl_proc = BLE_LL_CTRL_PROC_FEATURE_XCHG;
+        BLE_LL_CONN_CLEAR_FEATURE(connsm, BLE_LL_FEAT_SLAVE_INIT);
         break;
-    case BLE_LL_CTRL_CONN_PARM_RSP:
     case BLE_LL_CTRL_CONN_PARM_REQ:
+        BLE_LL_CONN_CLEAR_FEATURE(connsm, BLE_LL_FEAT_CONN_PARM_REQ);
+        if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
+            ble_ll_ctrl_conn_upd_make(connsm, rspdata, NULL);
+            connsm->reject_reason = BLE_ERR_SUCCESS;
+            return BLE_LL_CTRL_CONN_UPDATE_IND;
+        }
+        /* note: fall-through intentional */
+    case BLE_LL_CTRL_CONN_PARM_RSP:
         ctrl_proc = BLE_LL_CTRL_PROC_CONN_PARAM_REQ;
         break;
     case BLE_LL_CTRL_PING_REQ:
@@ -392,6 +486,7 @@ ble_ll_ctrl_proc_unk_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
          * support LE Ping feature.
          */
         ctrl_proc = BLE_LL_CTRL_PROC_LE_PING;
+        BLE_LL_CONN_CLEAR_FEATURE(connsm, BLE_LL_FEAT_LE_PING);
         break;
 #if (BLE_LL_BT5_PHY_SUPPORTED ==1)
     case BLE_LL_CTRL_PHY_REQ:
@@ -418,6 +513,38 @@ ble_ll_ctrl_proc_unk_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
             connsm->csmflags.cfbit.pending_hci_rd_features = 0;
         }
     }
+
+    return BLE_ERR_MAX;
+}
+
+/**
+ * Callback when LL control procedure times out (for a given connection). If
+ * this is called, it means that we need to end the connection because it
+ * has not responded to a LL control request.
+ *
+ * Context: Link Layer
+ *
+ * @param arg Pointer to connection state machine.
+ */
+static void
+ble_ll_ctrl_proc_rsp_timer_cb(struct ble_npl_event *ev)
+{
+    /* Control procedure has timed out. Kill the connection */
+    ble_ll_conn_timeout((struct ble_ll_conn_sm *)ble_npl_event_get_arg(ev),
+                        BLE_ERR_LMP_LL_RSP_TMO);
+}
+
+static void
+ble_ll_ctrl_start_rsp_timer(struct ble_ll_conn_sm *connsm)
+{
+    ble_npl_callout_init(&connsm->ctrl_proc_rsp_timer,
+                    &g_ble_ll_data.ll_evq,
+                    ble_ll_ctrl_proc_rsp_timer_cb,
+                    connsm);
+
+    /* Re-start timer. Control procedure timeout is 40 seconds */
+    ble_npl_callout_reset(&connsm->ctrl_proc_rsp_timer,
+                     ble_npl_time_ms_to_ticks32(BLE_LL_CTRL_PROC_TIMEOUT_MS));
 }
 
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
@@ -429,6 +556,8 @@ ble_ll_ctrl_phy_update_proc_complete(struct ble_ll_conn_sm *connsm)
 
     chk_proc_stop = 1;
     chk_host_phy = 1;
+
+    connsm->phy_tx_transition = BLE_PHY_TRANSITION_INVALID;
 
     if (CONN_F_PEER_PHY_UPDATE(connsm)) {
         CONN_F_PEER_PHY_UPDATE(connsm) = 0;
@@ -700,6 +829,18 @@ ble_ll_ctrl_rx_phy_req(struct ble_ll_conn_sm *connsm, uint8_t *req,
         CONN_F_PEER_PHY_UPDATE(connsm) = 1;
         ble_ll_ctrl_phy_req_rsp_make(connsm, rsp);
         rsp_opcode = BLE_LL_CTRL_PHY_RSP;
+
+        if (rsp[0] & BLE_PHY_MASK_1M) {
+            connsm->phy_tx_transition = BLE_PHY_1M;
+        } else if (rsp[0] & BLE_PHY_MASK_2M) {
+            connsm->phy_tx_transition = BLE_PHY_2M;
+        } else if (rsp[0] & BLE_PHY_MASK_CODED) {
+            connsm->phy_tx_transition = BLE_PHY_CODED;
+        }
+
+        /* Start response timer */
+        connsm->cur_ctrl_proc = BLE_LL_CTRL_PROC_PHY_UPDATE;
+        ble_ll_ctrl_start_rsp_timer(connsm);
     }
     return rsp_opcode;
 }
@@ -733,6 +874,8 @@ ble_ll_ctrl_rx_phy_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
          *
          * XXX: TODO count some stat?
          */
+    } else {
+        rsp_opcode = BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     /* NOTE: slave should never receive one of these */
@@ -747,8 +890,10 @@ ble_ll_ctrl_rx_phy_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
  *
  * @param connsm
  * @param dptr
+ *
+ * @return uint8_t
  */
-void
+static uint8_t
 ble_ll_ctrl_rx_phy_update_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
 {
     int no_change;
@@ -759,65 +904,69 @@ ble_ll_ctrl_rx_phy_update_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
     uint16_t instant;
     uint16_t delta;
 
-    if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
-        /*
-         * Reception stops the procedure response timer but does not
-         * complete the procedure
-         */
-        if (connsm->cur_ctrl_proc == BLE_LL_CTRL_PROC_PHY_UPDATE) {
-            ble_npl_callout_stop(&connsm->ctrl_proc_rsp_timer);
-        }
-
-        /*
-         * XXX: Should we check to see if we are expecting to receive one
-         * of these, and if not, kill connection? Meaning we better be
-         * doing either a PEER, CTRLR, or HOST phy update.
-         */
-        /* get the new phy masks and see if we need to change */
-        new_m_to_s_mask = dptr[0];
-        new_s_to_m_mask = dptr[1];
-        instant = get_le16(dptr + 2);
-
-        if ((new_m_to_s_mask == 0) && (new_s_to_m_mask == 0)) {
-            /* No change in phy */
-            no_change = 1;
-        } else {
-            no_change = 0;
-            /*
-             * NOTE: from the slaves perspective, the m to s phy is the one
-             * that the slave will receive on; s to m is the one it will
-             * transmit on
-             */
-            new_rx_phy = ble_ll_ctrl_phy_from_phy_mask(new_m_to_s_mask);
-            new_tx_phy = ble_ll_ctrl_phy_from_phy_mask(new_s_to_m_mask);
-
-            if ((new_tx_phy == 0) && (new_rx_phy == 0)) {
-                /* XXX: this is an error! What to do??? */
-                no_change = 1;
-            }
-
-            if ((new_tx_phy == connsm->phy_data.cur_tx_phy) &&
-                (new_rx_phy == connsm->phy_data.cur_rx_phy)) {
-                no_change = 1;
-            }
-        }
-
-        if (!no_change) {
-            /* If instant is in the past, we have to end the connection */
-            delta = (instant - connsm->event_cntr) & 0xFFFF;
-            if (delta >= 32767) {
-                ble_ll_conn_timeout(connsm, BLE_ERR_INSTANT_PASSED);
-            } else {
-                connsm->phy_data.new_tx_phy = new_tx_phy;
-                connsm->phy_data.new_rx_phy = new_rx_phy;
-                connsm->phy_instant = instant;
-                CONN_F_PHY_UPDATE_SCHED(connsm) = 1;
-            }
-            return;
-        }
-
-        ble_ll_ctrl_phy_update_proc_complete(connsm);
+    if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
+        return BLE_LL_CTRL_UNKNOWN_RSP;
     }
+
+    /*
+     * Reception stops the procedure response timer but does not
+     * complete the procedure
+     */
+    if (connsm->cur_ctrl_proc == BLE_LL_CTRL_PROC_PHY_UPDATE) {
+        ble_npl_callout_stop(&connsm->ctrl_proc_rsp_timer);
+    }
+
+    /*
+     * XXX: Should we check to see if we are expecting to receive one
+     * of these, and if not, kill connection? Meaning we better be
+     * doing either a PEER, CTRLR, or HOST phy update.
+     */
+    /* get the new phy masks and see if we need to change */
+    new_m_to_s_mask = dptr[0];
+    new_s_to_m_mask = dptr[1];
+    instant = get_le16(dptr + 2);
+
+    if ((new_m_to_s_mask == 0) && (new_s_to_m_mask == 0)) {
+        /* No change in phy */
+        no_change = 1;
+    } else {
+        no_change = 0;
+        /*
+         * NOTE: from the slaves perspective, the m to s phy is the one
+         * that the slave will receive on; s to m is the one it will
+         * transmit on
+         */
+        new_rx_phy = ble_ll_ctrl_phy_from_phy_mask(new_m_to_s_mask);
+        new_tx_phy = ble_ll_ctrl_phy_from_phy_mask(new_s_to_m_mask);
+
+        if ((new_tx_phy == 0) && (new_rx_phy == 0)) {
+            /* XXX: this is an error! What to do??? */
+            no_change = 1;
+        }
+
+        if ((new_tx_phy == connsm->phy_data.cur_tx_phy) &&
+            (new_rx_phy == connsm->phy_data.cur_rx_phy)) {
+            no_change = 1;
+        }
+    }
+
+    if (!no_change) {
+        /* If instant is in the past, we have to end the connection */
+        delta = (instant - connsm->event_cntr) & 0xFFFF;
+        if (delta >= 32767) {
+            ble_ll_conn_timeout(connsm, BLE_ERR_INSTANT_PASSED);
+        } else {
+            connsm->phy_data.new_tx_phy = new_tx_phy;
+            connsm->phy_data.new_rx_phy = new_rx_phy;
+            connsm->phy_instant = instant;
+            CONN_F_PHY_UPDATE_SCHED(connsm) = 1;
+        }
+        return BLE_ERR_MAX;
+    }
+
+    ble_ll_ctrl_phy_update_proc_complete(connsm);
+
+    return BLE_ERR_MAX;
 }
 #endif
 
@@ -885,28 +1034,24 @@ ble_ll_calc_session_key(struct ble_ll_conn_sm *connsm)
  *
  * XXX: the current code may actually allow some control pdu's to be sent
  * in states where they shouldnt. I dont expect those states to occur so I
- * dont try to check for them but we could do more...
+ * dont try to check for them but we could do more... for example there are
+ * different PDUs allowed for master/slave and TX/RX
  *
- * @param pkthdr
+ * @param llid
+ * @param opcode
+ * @param len
  *
  * @return int
  */
-int
-ble_ll_ctrl_enc_allowed_pdu(struct os_mbuf_pkthdr *pkthdr)
+static int
+ble_ll_ctrl_enc_allowed_pdu(uint8_t llid, uint8_t len, uint8_t opcode)
 {
     int allowed;
-    uint8_t opcode;
-    uint8_t llid;
-    struct os_mbuf *m;
-    struct ble_mbuf_hdr *ble_hdr;
 
     allowed = 0;
-    m = OS_MBUF_PKTHDR_TO_MBUF(pkthdr);
-    ble_hdr = BLE_MBUF_HDR_PTR(m);
 
-    llid = ble_hdr->txinfo.hdr_byte & BLE_LL_DATA_HDR_LLID_MASK;
-    if (llid == BLE_LL_LLID_CTRL) {
-        opcode = m->om_data[0];
+    switch (llid) {
+    case BLE_LL_LLID_CTRL:
         switch (opcode) {
         case BLE_LL_CTRL_REJECT_IND:
         case BLE_LL_CTRL_REJECT_IND_EXT:
@@ -919,12 +1064,58 @@ ble_ll_ctrl_enc_allowed_pdu(struct os_mbuf_pkthdr *pkthdr)
         case BLE_LL_CTRL_TERMINATE_IND:
             allowed = 1;
             break;
-        default:
-            break;
         }
+        break;
+    case BLE_LL_LLID_DATA_FRAG:
+        if (len == 0) {
+            /* Empty PDUs are allowed */
+            allowed = 1;
+        }
+        break;
     }
 
     return allowed;
+}
+
+int
+ble_ll_ctrl_enc_allowed_pdu_rx(struct os_mbuf *rxpdu)
+{
+    uint8_t llid;
+    uint8_t len;
+    uint8_t opcode;
+
+    llid = rxpdu->om_data[0] & BLE_LL_DATA_HDR_LLID_MASK;
+    len = rxpdu->om_data[1];
+    if (llid == BLE_LL_LLID_CTRL) {
+        opcode = rxpdu->om_data[2];
+    } else {
+        opcode = 0;
+    }
+
+    return ble_ll_ctrl_enc_allowed_pdu(llid, len, opcode);
+}
+
+int
+ble_ll_ctrl_enc_allowed_pdu_tx(struct os_mbuf_pkthdr *pkthdr)
+{
+    struct os_mbuf *m;
+    struct ble_mbuf_hdr *ble_hdr;
+    uint8_t llid;
+    uint8_t len;
+    uint8_t opcode;
+
+    m = OS_MBUF_PKTHDR_TO_MBUF(pkthdr);
+    ble_hdr = BLE_MBUF_HDR_PTR(m);
+
+    llid = ble_hdr->txinfo.hdr_byte & BLE_LL_DATA_HDR_LLID_MASK;
+    len = ble_hdr->txinfo.pyld_len;
+    if (llid == BLE_LL_LLID_CTRL) {
+        opcode = m->om_data[0];
+    } else {
+        opcode = 0;
+    }
+
+    return ble_ll_ctrl_enc_allowed_pdu(llid, len, opcode);
 }
 
 int
@@ -950,7 +1141,7 @@ ble_ll_ctrl_is_start_enc_rsp(struct os_mbuf *txpdu)
 }
 
 /**
- * Called to create and send a LL_START_ENC_REQ or LL_START_ENC_RSP
+ * Called to create and send a LL_START_ENC_REQ
  *
  * @param connsm
  * @param err
@@ -958,7 +1149,7 @@ ble_ll_ctrl_is_start_enc_rsp(struct os_mbuf *txpdu)
  * @return int
  */
 int
-ble_ll_ctrl_start_enc_send(struct ble_ll_conn_sm *connsm, uint8_t opcode)
+ble_ll_ctrl_start_enc_send(struct ble_ll_conn_sm *connsm)
 {
     int rc;
     struct os_mbuf *om;
@@ -966,8 +1157,13 @@ ble_ll_ctrl_start_enc_send(struct ble_ll_conn_sm *connsm, uint8_t opcode)
     om = os_msys_get_pkthdr(BLE_LL_CTRL_MAX_PDU_LEN,
                             sizeof(struct ble_mbuf_hdr));
     if (om) {
-        om->om_data[0] = opcode;
+        om->om_data[0] = BLE_LL_CTRL_START_ENC_REQ;
         ble_ll_conn_enqueue_pkt(connsm, om, BLE_LL_LLID_CTRL, 1);
+
+        /* Wait for LL_START_ENC_RSP */
+        connsm->cur_ctrl_proc = BLE_LL_CTRL_PROC_ENCRYPT;
+        ble_ll_ctrl_start_rsp_timer(connsm);
+
         rc = 0;
     } else {
         rc = -1;
@@ -1073,7 +1269,7 @@ ble_ll_ctrl_rx_enc_req(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
                        uint8_t *rspdata)
 {
     if (connsm->conn_role != BLE_LL_CONN_ROLE_SLAVE) {
-        return BLE_ERR_MAX;
+        return BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     /* In case we were already encrypted we need to reset packet counters */
@@ -1121,6 +1317,8 @@ ble_ll_ctrl_rx_start_enc_req(struct ble_ll_conn_sm *connsm)
             connsm->enc_data.enc_state = CONN_ENC_S_START_ENC_RSP_WAIT;
             rc = BLE_LL_CTRL_START_ENC_RSP;
         }
+    } else {
+        rc = BLE_LL_CTRL_UNKNOWN_RSP;
     }
     return rc;
 }
@@ -1139,6 +1337,8 @@ ble_ll_ctrl_rx_pause_enc_req(struct ble_ll_conn_sm *connsm)
     if ((connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) &&
         (connsm->enc_data.enc_state == CONN_ENC_S_ENCRYPTED)) {
         rc = BLE_LL_CTRL_PAUSE_ENC_RSP;
+    } else {
+        rc = BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     return rc;
@@ -1157,9 +1357,10 @@ ble_ll_ctrl_rx_pause_enc_rsp(struct ble_ll_conn_sm *connsm)
 {
     int rc;
 
-    rc = BLE_ERR_MAX;
     if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
         rc = BLE_LL_CTRL_PAUSE_ENC_RSP;
+    } else {
+        rc = BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     return rc;
@@ -1184,11 +1385,12 @@ ble_ll_ctrl_rx_start_enc_rsp(struct ble_ll_conn_sm *connsm)
         return BLE_ERR_MAX;
     }
 
+    ble_ll_ctrl_proc_stop(connsm, BLE_LL_CTRL_PROC_ENCRYPT);
+
     /* If master, we are done. Stop control procedure and sent event to host */
     if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
         /* We are encrypted */
         connsm->enc_data.enc_state = CONN_ENC_S_ENCRYPTED;
-        ble_ll_ctrl_proc_stop(connsm, BLE_LL_CTRL_PROC_ENCRYPT);
 #if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_PING) == 1)
         ble_ll_conn_auth_pyld_timer_start(connsm);
 #endif
@@ -1295,91 +1497,6 @@ ble_ll_ctrl_chanmap_req_make(struct ble_ll_conn_sm *connsm, uint8_t *pyld)
 }
 
 /**
- * Called to make a connection update request LL control PDU
- *
- * Context: Link Layer
- *
- * @param connsm
- * @param rsp
- */
-static void
-ble_ll_ctrl_conn_upd_make(struct ble_ll_conn_sm *connsm, uint8_t *pyld,
-                          struct ble_ll_conn_params *cp)
-{
-    uint16_t instant;
-    uint32_t dt;
-    uint32_t num_old_ce;
-    uint32_t new_itvl_usecs;
-    uint32_t old_itvl_usecs;
-    struct hci_conn_update *hcu;
-    struct ble_ll_conn_upd_req *req;
-
-    /*
-     * Set instant. We set the instant to the current event counter plus
-     * the amount of slave latency as the slave may not be listening
-     * at every connection interval and we are not sure when the connect
-     * request will actually get sent. We add one more event plus the
-     * minimum as per the spec of 6 connection events.
-     */
-    instant = connsm->event_cntr + connsm->slave_latency + 6 + 1;
-
-    /*
-     * XXX: This should change in the future, but for now we will just
-     * start the new instant at the same anchor using win offset 0.
-     */
-    /* Copy parameters in connection update structure */
-    hcu = &connsm->conn_param_req;
-    req = &connsm->conn_update_req;
-    if (cp) {
-        /* XXX: so we need to make the new anchor point some time away
-         * from txwinoffset by some amount of msecs. Not sure how to do
-           that here. We dont need to, but we should. */
-        /* Calculate offset from requested offsets (if any) */
-        if (cp->offset0 != 0xFFFF) {
-            new_itvl_usecs = cp->interval_max * BLE_LL_CONN_ITVL_USECS;
-            old_itvl_usecs = connsm->conn_itvl * BLE_LL_CONN_ITVL_USECS;
-            if ((int16_t)(cp->ref_conn_event_cnt - instant) >= 0) {
-                num_old_ce = cp->ref_conn_event_cnt - instant;
-                dt = old_itvl_usecs * num_old_ce;
-                dt += (cp->offset0 * BLE_LL_CONN_ITVL_USECS);
-                dt = dt % new_itvl_usecs;
-            } else {
-                num_old_ce = instant - cp->ref_conn_event_cnt;
-                dt = old_itvl_usecs * num_old_ce;
-                dt -= (cp->offset0 * BLE_LL_CONN_ITVL_USECS);
-                dt = dt % new_itvl_usecs;
-                dt = new_itvl_usecs - dt;
-            }
-            req->winoffset = dt / BLE_LL_CONN_TX_WIN_USECS;
-        } else {
-            req->winoffset = 0;
-        }
-        req->interval = cp->interval_max;
-        req->timeout = cp->timeout;
-        req->latency = cp->latency;
-        req->winsize = 1;
-    } else {
-        req->interval = hcu->conn_itvl_max;
-        req->timeout = hcu->supervision_timeout;
-        req->latency = hcu->conn_latency;
-        req->winoffset = 0;
-        req->winsize = connsm->tx_win_size;
-    }
-    req->instant = instant;
-
-    /* XXX: make sure this works for the connection parameter request proc. */
-    pyld[0] = req->winsize;
-    put_le16(pyld + 1, req->winoffset);
-    put_le16(pyld + 3, req->interval);
-    put_le16(pyld + 5, req->latency);
-    put_le16(pyld + 7, req->timeout);
-    put_le16(pyld + 9, instant);
-
-    /* Set flag in state machine to denote we have scheduled an update */
-    connsm->csmflags.cfbit.conn_update_sched = 1;
-}
-
-/**
  * Called to respond to a LL control PDU connection parameter request or
  * response.
  *
@@ -1416,11 +1533,12 @@ ble_ll_ctrl_conn_param_reply(struct ble_ll_conn_sm *connsm, uint8_t *rsp,
  * @param dptr
  * @param opcode
  */
-static void
+static int
 ble_ll_ctrl_rx_reject_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
-                          uint8_t opcode)
+                          uint8_t opcode, uint8_t *rspdata)
 {
     uint8_t ble_error;
+    uint8_t rsp_opcode = BLE_ERR_MAX;
 
     /* Get error out of received PDU */
     if (opcode == BLE_LL_CTRL_REJECT_IND) {
@@ -1434,8 +1552,15 @@ ble_ll_ctrl_rx_reject_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
     switch (connsm->cur_ctrl_proc) {
     case BLE_LL_CTRL_PROC_CONN_PARAM_REQ:
         if (opcode == BLE_LL_CTRL_REJECT_IND_EXT) {
-            ble_ll_ctrl_proc_stop(connsm, BLE_LL_CTRL_PROC_CONN_PARAM_REQ);
-            ble_ll_hci_ev_conn_update(connsm, ble_error);
+            /* As a master we should send connection update indication in this point */
+            if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
+                rsp_opcode = BLE_LL_CTRL_CONN_UPDATE_IND;
+                ble_ll_ctrl_conn_upd_make(connsm, rspdata, NULL);
+                connsm->reject_reason = BLE_ERR_SUCCESS;
+            } else {
+                ble_ll_ctrl_proc_stop(connsm, BLE_LL_CTRL_PROC_CONN_PARAM_REQ);
+                ble_ll_hci_ev_conn_update(connsm, ble_error);
+            }
         }
         break;
 #if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION) == 1)
@@ -1452,15 +1577,17 @@ ble_ll_ctrl_rx_reject_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
         break;
 #endif
     case BLE_LL_CTRL_PROC_DATA_LEN_UPD:
-	/* That should not happen according to Bluetooth 5.0 Vol6 Part B, 5.1.9
-	 * However we need this workaround as there are devices on the market
-	 * which do send LL_REJECT on LL_LENGTH_REQ when collision happens
-	 */
+        /* That should not happen according to Bluetooth 5.0 Vol6 Part B, 5.1.9
+         * However we need this workaround as there are devices on the market
+         * which do send LL_REJECT on LL_LENGTH_REQ when collision happens
+         */
         ble_ll_ctrl_proc_stop(connsm, BLE_LL_CTRL_PROC_DATA_LEN_UPD);
         break;
     default:
         break;
     }
+
+    return rsp_opcode;
 }
 
 /**
@@ -1480,7 +1607,7 @@ ble_ll_ctrl_rx_conn_update(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
 
     /* Only a slave should receive this */
     if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
-        return BLE_ERR_MAX;
+        return BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     /* Retrieve parameters */
@@ -1502,6 +1629,21 @@ ble_ll_ctrl_rx_conn_update(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
         ble_ll_conn_timeout(connsm, BLE_ERR_INSTANT_PASSED);
     } else {
         connsm->csmflags.cfbit.conn_update_sched = 1;
+
+        /*
+         * Errata says that receiving a connection update when the event
+         * counter is equal to the instant means wesimply ignore the window
+         * offset and window size. Anchor point has already been set based on
+         * first packet received in connection event. Given that we increment
+         * the event counter BEFORE checking to see if the instant is equal to
+         * the event counter what we do here is increment the instant and set
+         * the window offset and size to 0.
+         */
+        if (conn_events == 0) {
+            reqdata->winoffset = 0;
+            reqdata->winsize = 0;
+            reqdata->instant += 1;
+        }
     }
 
     return rsp_opcode;
@@ -1675,7 +1817,7 @@ ble_ll_ctrl_rx_conn_param_rsp(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
 
     /* A slave should never receive this response */
     if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
-        return BLE_ERR_MAX;
+        return BLE_LL_CTRL_UNKNOWN_RSP;
     }
 
     /*
@@ -1744,41 +1886,28 @@ ble_ll_ctrl_rx_version_ind(struct ble_ll_conn_sm *connsm, uint8_t *dptr,
  * @param connsm
  * @param dptr
  */
-static void
+static int
 ble_ll_ctrl_rx_chanmap_req(struct ble_ll_conn_sm *connsm, uint8_t *dptr)
 {
     uint16_t instant;
     uint16_t conn_events;
 
-    /* If instant is in the past, we have to end the connection */
-    if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
-        instant = get_le16(dptr + BLE_LL_CONN_CHMAP_LEN);
-        conn_events = (instant - connsm->event_cntr) & 0xFFFF;
-        if (conn_events >= 32767) {
-            ble_ll_conn_timeout(connsm, BLE_ERR_INSTANT_PASSED);
-        } else {
-            connsm->chanmap_instant = instant;
-            memcpy(connsm->req_chanmap, dptr, BLE_LL_CONN_CHMAP_LEN);
-            connsm->csmflags.cfbit.chanmap_update_scheduled = 1;
-        }
+    if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
+        return BLE_LL_CTRL_UNKNOWN_RSP;
     }
-}
 
-/**
- * Callback when LL control procedure times out (for a given connection). If
- * this is called, it means that we need to end the connection because it
- * has not responded to a LL control request.
- *
- * Context: Link Layer
- *
- * @param arg Pointer to connection state machine.
- */
-void
-ble_ll_ctrl_proc_rsp_timer_cb(struct ble_npl_event *ev)
-{
-    /* Control procedure has timed out. Kill the connection */
-    ble_ll_conn_timeout((struct ble_ll_conn_sm *)ble_npl_event_get_arg(ev),
-                        BLE_ERR_LMP_LL_RSP_TMO);
+    /* If instant is in the past, we have to end the connection */
+    instant = get_le16(dptr + BLE_LL_CONN_CHMAP_LEN);
+    conn_events = (instant - connsm->event_cntr) & 0xFFFF;
+    if (conn_events >= 32767) {
+        ble_ll_conn_timeout(connsm, BLE_ERR_INSTANT_PASSED);
+    } else {
+        connsm->chanmap_instant = instant;
+        memcpy(connsm->req_chanmap, dptr, BLE_LL_CONN_CHMAP_LEN);
+        connsm->csmflags.cfbit.chanmap_update_scheduled = 1;
+    }
+
+    return BLE_ERR_MAX;
 }
 
 /**
@@ -1978,14 +2107,7 @@ ble_ll_ctrl_proc_start(struct ble_ll_conn_sm *connsm, int ctrl_proc)
 
             /* Initialize the procedure response timeout */
             if (ctrl_proc != BLE_LL_CTRL_PROC_CHAN_MAP_UPD) {
-                ble_npl_callout_init(&connsm->ctrl_proc_rsp_timer,
-                                &g_ble_ll_data.ll_evq,
-                                ble_ll_ctrl_proc_rsp_timer_cb,
-                                connsm);
-
-                /* Re-start timer. Control procedure timeout is 40 seconds */
-                ble_npl_callout_reset(&connsm->ctrl_proc_rsp_timer,
-                                 ble_npl_time_ms_to_ticks32(BLE_LL_CTRL_PROC_TIMEOUT_MS));
+                ble_ll_ctrl_start_rsp_timer(connsm);
             }
         }
     }
@@ -2154,6 +2276,9 @@ ble_ll_ctrl_rx_pdu(struct ble_ll_conn_sm *connsm, struct os_mbuf *om)
     case BLE_LL_CTRL_PHY_REQ:
         feature = BLE_LL_FEAT_LE_2M_PHY | BLE_LL_FEAT_LE_CODED_PHY;
         break;
+    case BLE_LL_CTRL_MIN_USED_CHAN_IND:
+        feature = BLE_LL_FEAT_MIN_USED_CHAN;
+        break;
     default:
         feature = 0;
         break;
@@ -2187,7 +2312,7 @@ ble_ll_ctrl_rx_pdu(struct ble_ll_conn_sm *connsm, struct os_mbuf *om)
         rsp_opcode = ble_ll_ctrl_rx_conn_update(connsm, dptr);
         break;
     case BLE_LL_CTRL_CHANNEL_MAP_REQ:
-        ble_ll_ctrl_rx_chanmap_req(connsm, dptr);
+        rsp_opcode = ble_ll_ctrl_rx_chanmap_req(connsm, dptr);
         break;
     case BLE_LL_CTRL_LENGTH_REQ:
         /* Extract parameters and check if valid */
@@ -2228,7 +2353,7 @@ ble_ll_ctrl_rx_pdu(struct ble_ll_conn_sm *connsm, struct os_mbuf *om)
         }
         break;
     case BLE_LL_CTRL_UNKNOWN_RSP:
-        ble_ll_ctrl_proc_unk_rsp(connsm, dptr);
+        rsp_opcode = ble_ll_ctrl_proc_unk_rsp(connsm, dptr, rspdata);
         break;
     case BLE_LL_CTRL_FEATURE_REQ:
         rsp_opcode = ble_ll_ctrl_rx_feature_req(connsm, dptr, rspbuf, opcode);
@@ -2296,7 +2421,8 @@ ble_ll_ctrl_rx_pdu(struct ble_ll_conn_sm *connsm, struct os_mbuf *om)
     /* Fall-through intentional... */
     case BLE_LL_CTRL_REJECT_IND:
     case BLE_LL_CTRL_REJECT_IND_EXT:
-        ble_ll_ctrl_rx_reject_ind(connsm, dptr, opcode);
+        /* Sometimes reject triggers sending other LL CTRL msg */
+        rsp_opcode = ble_ll_ctrl_rx_reject_ind(connsm, dptr, opcode, rspdata);
         break;
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
     case BLE_LL_CTRL_PHY_REQ:
@@ -2306,7 +2432,7 @@ ble_ll_ctrl_rx_pdu(struct ble_ll_conn_sm *connsm, struct os_mbuf *om)
         rsp_opcode = ble_ll_ctrl_rx_phy_rsp(connsm, dptr, rspdata);
         break;
     case BLE_LL_CTRL_PHY_UPDATE_IND:
-        ble_ll_ctrl_rx_phy_update_ind(connsm, dptr);
+        rsp_opcode = ble_ll_ctrl_rx_phy_update_ind(connsm, dptr);
         break;
 #endif
     default:
@@ -2411,8 +2537,15 @@ ble_ll_ctrl_tx_done(struct os_mbuf *txpdu, struct ble_ll_conn_sm *connsm)
         break;
     case BLE_LL_CTRL_REJECT_IND_EXT:
         if (connsm->cur_ctrl_proc == BLE_LL_CTRL_PROC_CONN_PARAM_REQ) {
-            connsm->reject_reason = txpdu->om_data[2];
-            connsm->csmflags.cfbit.host_expects_upd_event = 1;
+            /* If rejecting opcode is BLE_LL_CTRL_PROC_CONN_PARAM_REQ and
+             * reason is LMP collision that means we are master on the link and
+             * peer wanted to start procedure which we already started.
+             * Let's wait for response and do not close procedure. */
+            if (txpdu->om_data[1] == BLE_LL_CTRL_CONN_PARM_REQ &&
+                            txpdu->om_data[2] != BLE_ERR_LMP_COLLISION) {
+                connsm->reject_reason = txpdu->om_data[2];
+                connsm->csmflags.cfbit.host_expects_upd_event = 1;
+            }
         }
 #if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_ENCRYPTION) == 1)
         if (connsm->enc_data.enc_state > CONN_ENC_S_ENCRYPTED) {
@@ -2446,6 +2579,19 @@ ble_ll_ctrl_tx_done(struct os_mbuf *txpdu, struct ble_ll_conn_sm *connsm)
     case BLE_LL_CTRL_PAUSE_ENC_RSP:
         if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
             connsm->enc_data.enc_state = CONN_ENC_S_PAUSE_ENC_RSP_WAIT;
+        }
+        break;
+#endif
+#if (BLE_LL_BT5_PHY_SUPPORTED == 1)
+    case BLE_LL_CTRL_PHY_REQ:
+        if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
+            if (connsm->phy_data.req_pref_tx_phys_mask & BLE_PHY_MASK_1M) {
+                connsm->phy_tx_transition = BLE_PHY_1M;
+            } else if (connsm->phy_data.req_pref_tx_phys_mask & BLE_PHY_MASK_2M) {
+                connsm->phy_tx_transition = BLE_PHY_2M;
+            } else if (connsm->phy_data.req_pref_tx_phys_mask & BLE_PHY_MASK_CODED) {
+                connsm->phy_tx_transition = BLE_PHY_CODED;
+            }
         }
         break;
 #endif

@@ -619,16 +619,20 @@ ble_hs_test_util_set_our_irk(const uint8_t *irk, int fail_idx,
             ble_hs_test_util_hci_misc_exp_status(2, fail_idx, hci_status),
         },
         {
-            BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_ADD_RESOLV_LIST),
+            BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_SET_ADV_ENABLE),
             ble_hs_test_util_hci_misc_exp_status(3, fail_idx, hci_status),
         },
         {
-            BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_SET_PRIVACY_MODE),
+            BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_ADD_RESOLV_LIST),
             ble_hs_test_util_hci_misc_exp_status(4, fail_idx, hci_status),
         },
         {
             BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_SET_PRIVACY_MODE),
-            ble_hs_test_util_hci_misc_exp_status(4, fail_idx, hci_status),
+            ble_hs_test_util_hci_misc_exp_status(5, fail_idx, hci_status),
+        },
+        {
+            BLE_HS_TEST_UTIL_LE_OPCODE(BLE_HCI_OCF_LE_SET_PRIVACY_MODE),
+            ble_hs_test_util_hci_misc_exp_status(6, fail_idx, hci_status),
         },
         {
             0
@@ -1265,14 +1269,14 @@ ble_hs_test_util_verify_tx_find_info_rsp(
             TEST_ASSERT(rsp.bafp_format ==
                         BLE_ATT_FIND_INFO_RSP_FORMAT_16BIT);
 
-            ble_uuid_init_from_mbuf(&uuid, om, off, 2);
+            ble_uuid_init_from_att_mbuf(&uuid, om, off, 2);
             TEST_ASSERT(rc == 0);
             off += 2;
         } else {
             TEST_ASSERT(rsp.bafp_format ==
                         BLE_ATT_FIND_INFO_RSP_FORMAT_128BIT);
 
-            rc = ble_uuid_init_from_mbuf(&uuid, om, off, 16);
+            rc = ble_uuid_init_from_att_mbuf(&uuid, om, off, 16);
             TEST_ASSERT(rc == 0);
             off += 16;
         }
@@ -1324,10 +1328,10 @@ ble_hs_test_util_verify_tx_read_group_type_rsp(
         off += 2;
 
         if (entry->uuid->type == BLE_UUID_TYPE_16) {
-            rc = ble_uuid_init_from_mbuf(&uuid, om, off, 2);
+            rc = ble_uuid_init_from_att_mbuf(&uuid, om, off, 2);
             TEST_ASSERT(rc == 0);
         } else {
-            rc = ble_uuid_init_from_mbuf(&uuid, om, off, 16);
+            rc = ble_uuid_init_from_att_mbuf(&uuid, om, off, 16);
             TEST_ASSERT(rc == 0);
         }
 
@@ -1985,11 +1989,10 @@ ble_hs_test_util_reg_svcs(const struct ble_gatt_svc_def *svcs,
     TEST_ASSERT_FATAL(rc == 0);
 }
 
-void
-ble_hs_test_util_init_no_start(void)
-{
-    sysinit();
 
+void
+ble_hs_test_util_init_no_sysinit_no_start(void)
+{
     STAILQ_INIT(&ble_hs_test_util_prev_tx_queue);
     ble_hs_test_util_prev_tx_cur = NULL;
 
@@ -1999,6 +2002,8 @@ ble_hs_test_util_init_no_start(void)
                          ble_hs_test_util_pkt_txed, NULL);
 
     ble_hs_test_util_hci_ack_set_startup();
+
+    ble_hs_enabled_state = BLE_HS_ENABLED_STATE_OFF;
 
     ble_hs_max_services = 16;
     ble_hs_max_client_configs = 32;
@@ -2011,6 +2016,13 @@ ble_hs_test_util_init_no_start(void)
     ble_hs_cfg.store_delete_cb = ble_hs_test_util_store_delete;
 
     ble_store_clear();
+}
+
+void
+ble_hs_test_util_init_no_start(void)
+{
+    sysinit();
+    ble_hs_test_util_init_no_sysinit_no_start();
 }
 
 void

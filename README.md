@@ -65,11 +65,11 @@ Generic Attribute Profile (GATT) and Security Manager (SM).
 - nimble/transport: Contains code for supported transport protocols between host
 and controller. This includes UART, emSPI and RAM (used in combined build when
 host and controller run on same CPU)
-([transport](https://github.com/apache/mynewt-nimble/tree/master/nimble/drivers))
+([transport](https://github.com/apache/mynewt-nimble/tree/master/nimble/transport))
 
 - porting: Contains implementation of NimBLE Porting Layer (NPL) for supported
 operating systems
-([transport](https://github.com/apache/mynewt-nimble/tree/master/porting))
+([porting](https://github.com/apache/mynewt-nimble/tree/master/porting))
 
 - ext: Contains external libraries used by NimBLE. Those are used if not
 provided by OS
@@ -84,7 +84,7 @@ stack. These sample applications are located in the `apps/` directory of
 Apache Mynewt [repo](https://github.com/apache/mynewt-core). Some examples:
 
 * [blecent](https://github.com/apache/mynewt-core/tree/master/apps/blecent):
-A basic central device with no user interface.  Thisa pplication scans for
+A basic central device with no user interface.  This application scans for
 a peripheral that supports the alert notification service (ANS). Upon
 discovering such a peripheral, blecent connects and performs a characteristic
 read, characteristic write, and notification subscription.
@@ -95,7 +95,7 @@ HCI over UART.
 * [bleprph](https://github.com/apache/mynewt-core/tree/master/apps/bleprph): An
   implementation of a minimal BLE peripheral.
 * [btshell](https://github.com/apache/mynewt-core/tree/master/apps/btshell): A
-  shell-like application allowing to configure and use most og NimBLE
+  shell-like application allowing to configure and use most of NimBLE
   functionality from command line.
 * [bleuart](https://github.com/apache/mynewt-core/tree/master/apps/bleuart):
 Implements a simple BLE peripheral that supports the Nordic

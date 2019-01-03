@@ -417,7 +417,7 @@ void bt_mesh_proxy_beacon_send(struct bt_mesh_subnet *sub)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
-		if (clients[i].conn_handle) {
+		if (clients[i].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
 			beacon_send(clients[i].conn_handle, sub);
 		}
 	}
@@ -607,7 +607,7 @@ static void proxy_connected(uint16_t conn_handle)
 	}
 
 	for (client = NULL, i = 0; i < ARRAY_SIZE(clients); i++) {
-		if (!clients[i].conn_handle) {
+		if (clients[i].conn_handle == BLE_HS_CONN_HANDLE_NONE) {
 			client = &clients[i];
 			break;
 		}
@@ -693,7 +693,7 @@ int bt_mesh_proxy_prov_enable(void)
 	prov_fast_adv = true;
 
 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
-		if (clients[i].conn_handle) {
+		if (clients[i].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
 			clients[i].filter_type = PROV;
 		}
 	}
@@ -721,7 +721,8 @@ int bt_mesh_proxy_prov_disable(void)
 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
 		struct bt_mesh_proxy_client *client = &clients[i];
 
-		if (clients->conn_handle && client->filter_type == PROV) {
+        if ((client->conn_handle != BLE_HS_CONN_HANDLE_NONE)
+                && (client->filter_type == PROV)) {
 			bt_mesh_pb_gatt_close(client->conn_handle);
 			client->filter_type = NONE;
 		}
@@ -765,7 +766,7 @@ int bt_mesh_proxy_gatt_enable(void)
 	gatt_svc = MESH_GATT_PROXY;
 
 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
-		if (clients[i].conn_handle) {
+		if (clients[i].conn_handle != BLE_HS_CONN_HANDLE_NONE) {
 			clients[i].filter_type = WHITELIST;
 		}
 	}
@@ -877,7 +878,7 @@ bool bt_mesh_proxy_relay(struct os_mbuf *buf, u16_t dst)
 		struct bt_mesh_proxy_client *client = &clients[i];
 		struct os_mbuf *msg;
 
-		if (!client->conn_handle) {
+		if (client->conn_handle == BLE_HS_CONN_HANDLE_NONE) {
 			continue;
 		}
 
@@ -987,9 +988,6 @@ static const struct bt_data prov_ad[] = {
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x27, 0x18),
 	BT_DATA(BT_DATA_SVC_DATA16, prov_svc_data, sizeof(prov_svc_data)),
 };
-
-static struct bt_data prov_sd[2];
-static size_t prov_sd_len;
 #endif /* PB_GATT */
 
 #if (MYNEWT_VAL(BLE_MESH_GATT_PROXY))
@@ -1183,6 +1181,52 @@ static s32_t gatt_proxy_advertise(struct bt_mesh_subnet *sub)
 }
 #endif /* GATT_PROXY */
 
+#if (MYNEWT_VAL(BLE_MESH_PB_GATT))
+static size_t gatt_prov_adv_create(struct bt_data prov_sd[2])
+{
+	const struct bt_mesh_prov *prov = bt_mesh_prov_get();
+	const char *name = CONFIG_BT_DEVICE_NAME;
+	size_t name_len = strlen(name);
+	size_t prov_sd_len = 0;
+	size_t sd_space = 31;
+
+	memcpy(prov_svc_data + 2, prov->uuid, 16);
+	sys_put_be16(prov->oob_info, prov_svc_data + 18);
+
+	if (prov->uri) {
+		size_t uri_len = strlen(prov->uri);
+
+		if (uri_len > 29) {
+			/* There's no way to shorten an URI */
+			BT_WARN("Too long URI to fit advertising packet");
+		} else {
+			prov_sd[0].type = BT_DATA_URI;
+			prov_sd[0].data_len = uri_len;
+			prov_sd[0].data = (void *)prov->uri;
+			sd_space -= 2 + uri_len;
+			prov_sd_len++;
+		}
+	}
+
+	if (sd_space > 2 && name_len > 0) {
+		sd_space -= 2;
+
+		if (sd_space < name_len) {
+			prov_sd[prov_sd_len].type = BT_DATA_NAME_SHORTENED;
+			prov_sd[prov_sd_len].data_len = sd_space;
+		} else {
+			prov_sd[prov_sd_len].type = BT_DATA_NAME_COMPLETE;
+			prov_sd[prov_sd_len].data_len = name_len;
+		}
+
+		prov_sd[prov_sd_len].data = (void *)name;
+		prov_sd_len++;
+	}
+
+	return prov_sd_len;
+}
+#endif /* PB_GATT */
+
 s32_t bt_mesh_proxy_adv_start(void)
 {
 	BT_DBG("");
@@ -1194,12 +1238,16 @@ s32_t bt_mesh_proxy_adv_start(void)
 #if (MYNEWT_VAL(BLE_MESH_PB_GATT))
 	if (!bt_mesh_is_provisioned()) {
 		const struct ble_gap_adv_params *param;
+		struct bt_data prov_sd[2];
+		size_t prov_sd_len;
 
 		if (prov_fast_adv) {
 			param = &fast_adv_param;
 		} else {
 			param = &slow_adv_param;
 		}
+
+		prov_sd_len = gatt_prov_adv_create(prov_sd);
 
 		if (bt_le_adv_start(param, prov_ad, ARRAY_SIZE(prov_ad),
 				    prov_sd, prov_sd_len) == 0) {
@@ -1336,46 +1384,8 @@ int bt_mesh_proxy_init(void)
 		k_work_init(&clients[i].send_beacons, proxy_send_beacons);
 #endif
 		clients[i].buf = NET_BUF_SIMPLE(CLIENT_BUF_SIZE);
+		clients[i].conn_handle = BLE_HS_CONN_HANDLE_NONE;
 	}
-
-#if (MYNEWT_VAL(BLE_MESH_PB_GATT))
-	const struct bt_mesh_prov *prov = bt_mesh_prov_get();
-	size_t name_len = strlen(CONFIG_BT_DEVICE_NAME);
-	size_t sd_space = 31;
-
-	memcpy(prov_svc_data + 2, prov->uuid, 16);
-	sys_put_be16(prov->oob_info, prov_svc_data + 18);
-
-	if (prov->uri) {
-		size_t uri_len = strlen(prov->uri);
-
-		if (uri_len > 29) {
-			/* There's no way to shorten an URI */
-			BT_WARN("Too long URI to fit advertising packet");
-		} else {
-			prov_sd[0].type = BT_DATA_URI;
-			prov_sd[0].data_len = uri_len;
-			prov_sd[0].data = (void *)prov->uri;
-			sd_space -= 2 + uri_len;
-			prov_sd_len++;
-		}
-	}
-
-	if (sd_space > 2 && name_len > 0) {
-		sd_space -= 2;
-
-		if (sd_space < name_len) {
-			prov_sd[prov_sd_len].type = BT_DATA_NAME_SHORTENED;
-			prov_sd[prov_sd_len].data_len = sd_space;
-		} else {
-			prov_sd[prov_sd_len].type = BT_DATA_NAME_COMPLETE;
-			prov_sd[prov_sd_len].data_len = name_len;
-		}
-
-		prov_sd[prov_sd_len].data = (void *)CONFIG_BT_DEVICE_NAME;
-		prov_sd_len++;
-	}
-#endif
 
 	resolve_svc_handles();
 

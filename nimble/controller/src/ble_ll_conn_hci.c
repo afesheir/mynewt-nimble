@@ -163,7 +163,13 @@ ble_ll_conn_comp_event_send(struct ble_ll_conn_sm *connsm, uint8_t status,
             if (enh_enabled) {
                 memset(evdata, 0, 2 * BLE_DEV_ADDR_LEN);
                 if (connsm->conn_role == BLE_LL_CONN_ROLE_MASTER) {
-                    if (connsm->own_addr_type > BLE_HCI_ADV_OWN_ADDR_RANDOM) {
+                    if (connsm->inita_identity_used) {
+                        /* If it was direct advertising we were replying to and we used
+                         * identity address there (which might be just fine), we should
+                         * we should take it into account here in this event.
+                         */
+                        rpa = NULL;
+                    } else  if (connsm->own_addr_type > BLE_HCI_ADV_OWN_ADDR_RANDOM) {
                         rpa = ble_ll_scan_get_local_rpa();
                     } else {
                         rpa = NULL;
@@ -853,7 +859,7 @@ ble_ll_conn_hci_update(uint8_t *cmdbuf)
     /* See if this feature is supported on both sides */
     if ((connsm->conn_features & BLE_LL_FEAT_CONN_PARM_REQ) == 0) {
         if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
-            return BLE_ERR_CMD_DISALLOWED;
+            return BLE_ERR_UNSUPP_REM_FEATURE;
         }
         ctrl_proc = BLE_LL_CTRL_PROC_CONN_UPDATE;
     } else {
@@ -1362,7 +1368,7 @@ ble_ll_conn_hci_le_ltk_reply(uint8_t *cmdbuf, uint8_t *rspbuf, uint8_t *rsplen)
 
     swap_buf(connsm->enc_data.enc_block.key, cmdbuf + 2, 16);
     ble_ll_calc_session_key(connsm);
-    ble_ll_ctrl_start_enc_send(connsm, BLE_LL_CTRL_START_ENC_REQ);
+    ble_ll_ctrl_start_enc_send(connsm);
     rc = BLE_ERR_SUCCESS;
 
 ltk_key_cmd_complete:

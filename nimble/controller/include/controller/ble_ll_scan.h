@@ -92,22 +92,32 @@ struct ble_ll_scan_params
 #define BLE_LL_AUX_INCOMPLETE_BIT       0x02
 #define BLE_LL_AUX_INCOMPLETE_ERR_BIT   0x04
 #define BLE_LL_AUX_HAS_ADDRA            0x08
+#define BLE_LL_AUX_IGNORE_BIT           0x10
+#define BLE_LL_AUX_HAS_DIR_ADDRA        0x20
+#define BLE_LL_AUX_TRUNCATED_SENT       0x40
+#define BLE_LL_AUX_HAS_ADI              0x80
 
+#define BLE_LL_SET_AUX_FLAG(aux_data, flag) ((aux_data)->flags |= flag)
 #define BLE_LL_CHECK_AUX_FLAG(aux_data, flag) (!!((aux_data)->flags & flag))
 
 struct ble_ll_aux_data {
+    uint8_t ref_cnt;
     uint8_t chan;
     uint8_t aux_phy;
     uint8_t aux_primary_phy;
     uint8_t mode;
     uint8_t scanning;
     uint8_t flags;
-    uint16_t did;
+    uint16_t adi;
     uint32_t offset;
     uint8_t offset_units;
     uint8_t addr[6];
     uint8_t addr_type;
+    uint8_t dir_addr[6];
+    uint8_t dir_addr_type;
+    uint8_t evt_type;
     struct ble_ll_sched_item sch;
+    struct ble_ll_ext_adv_report *evt;
 };
 
 struct ble_ll_scan_sm
@@ -224,9 +234,7 @@ int ble_ll_scan_adv_decode_addr(uint8_t pdu_type, uint8_t *rxbuf,
 
 #if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_EXT_ADV)
 /* Get aux ptr from ext advertising */
-int ble_ll_scan_get_aux_data(struct ble_ll_scan_sm *scansm,
-                             struct ble_mbuf_hdr *ble_hdr, uint8_t *rxbuf,
-                             struct ble_ll_aux_data **aux_data);
+int ble_ll_scan_get_aux_data(struct ble_mbuf_hdr *ble_hdr, uint8_t *rxbuf);
 
 /* Initialize the extended scanner when we start initiating */
 struct hci_ext_create_conn;
@@ -234,15 +242,20 @@ int ble_ll_scan_ext_initiator_start(struct hci_ext_create_conn *hcc,
                                     struct ble_ll_scan_sm **sm);
 
 /* Called to parse extended advertising*/
-struct ble_ll_ext_adv;
-int ble_ll_scan_parse_ext_hdr(struct os_mbuf *om, struct ble_mbuf_hdr *ble_hdr,
-                              struct ble_ll_ext_adv *parsed_evt);
+struct ble_ll_ext_adv_report;
+int ble_ll_scan_parse_ext_hdr(struct os_mbuf *om,
+                              uint8_t *adva, uint8_t adva_type,
+                              uint8_t *inita, uint8_t inita_type,
+                              struct ble_mbuf_hdr *ble_hdr,
+                              struct ble_ll_ext_adv_report *parsed_evt);
 
-void ble_ll_scan_aux_data_free(struct ble_ll_aux_data *aux_scan);
+void ble_ll_scan_aux_data_ref(struct ble_ll_aux_data *aux_scan);
+int ble_ll_scan_aux_data_unref(struct ble_ll_aux_data *aux_scan);
 #endif
 
 /* Called to clean up current aux data */
 void ble_ll_scan_clean_cur_aux_data(void);
+void ble_ll_scan_end_adv_evt(struct ble_ll_aux_data *aux_data);
 
 #ifdef __cplusplus
 }

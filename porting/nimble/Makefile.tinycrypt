@@ -15,13 +15,17 @@
 # under the License.
 #
 
-NIMBLE_INCLUDE += \
-	$(NIMBLE_ROOT)/ext/tinycrypt/include \
+TINYCRYPT_CFLAGS := -std=c99
 
-NIMBLE_SRC += \
+TINYCRYPT_INCLUDE := \
+	$(NIMBLE_ROOT)/ext/tinycrypt/include \
+	$(NULL)
+
+TINYCRYPT_SRC := \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/aes_decrypt.c \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/aes_encrypt.c \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/cmac_mode.c \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/ecc.c \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/ecc_dh.c \
 	$(NIMBLE_ROOT)/ext/tinycrypt/src/utils.c \
+	$(NULL)

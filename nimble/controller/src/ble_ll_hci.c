@@ -59,6 +59,12 @@ bool ble_ll_hci_adv_mode_ext(void)
 {
     return hci_adv_mode == ADV_MODE_EXT;
 }
+#else
+bool
+ble_ll_hci_adv_mode_ext(void)
+{
+    return false;
+}
 #endif
 
 /**
@@ -315,15 +321,20 @@ ble_ll_hci_le_read_bufsize(uint8_t *rspbuf, uint8_t *rsplen)
  * @param txphy Pointer to output tx phy mask
  * @param rxphy Pointer to output rx phy mask
  *
- * @return int BLE_ERR_SUCCESS or BLE_ERR_INV_HCI_CMD_PARMS
+ * @return int BLE_ERR_SUCCESS or BLE_ERR_INV_HCI_CMD_PARMS or BLE_ERR_UNSUPPORTED
  */
 int
 ble_ll_hci_chk_phy_masks(uint8_t *cmdbuf, uint8_t *txphy, uint8_t *rxphy)
 {
-    int rc;
     uint8_t all_phys;
     uint8_t rx_phys;
     uint8_t tx_phys;
+
+    /* Check for RFU */
+    if ((cmdbuf[1] & ~BLE_HCI_LE_PHY_PREF_MASK_ALL) ||
+                    (cmdbuf[2] & ~BLE_HCI_LE_PHY_PREF_MASK_ALL)) {
+        return BLE_ERR_UNSUPPORTED;
+    }
 
     /* Check for valid values */
     all_phys = cmdbuf[0];
@@ -332,29 +343,34 @@ ble_ll_hci_chk_phy_masks(uint8_t *cmdbuf, uint8_t *txphy, uint8_t *rxphy)
 
     if ((!(all_phys & BLE_HCI_LE_PHY_NO_TX_PREF_MASK) && (tx_phys == 0)) ||
         (!(all_phys & BLE_HCI_LE_PHY_NO_RX_PREF_MASK) && (rx_phys == 0))) {
-        rc = BLE_ERR_INV_HCI_CMD_PARMS;
-    } else {
-        /* If phy not supported, wipe its bit */
+        return BLE_ERR_INV_HCI_CMD_PARMS;
+    }
+
+    /* If phy not supported, return error */
 #if !MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_2M_PHY)
-        tx_phys &= ~BLE_HCI_LE_PHY_2M_PREF_MASK;
-        rx_phys &= ~BLE_HCI_LE_PHY_2M_PREF_MASK;
+    if((tx_phys & BLE_HCI_LE_PHY_2M_PREF_MASK) ||
+                    (rx_phys & BLE_HCI_LE_PHY_2M_PREF_MASK)) {
+        return BLE_ERR_UNSUPPORTED;
+    }
 #endif
 #if !MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
-        tx_phys &= ~BLE_HCI_LE_PHY_CODED_PREF_MASK;
-        rx_phys &= ~BLE_HCI_LE_PHY_CODED_PREF_MASK;
-#endif
-        /* Set the default PHY preferences */
-        if (all_phys & BLE_HCI_LE_PHY_NO_TX_PREF_MASK) {
-            tx_phys = BLE_HCI_LE_PHY_PREF_MASK_ALL;
-        }
-        *txphy = tx_phys;
-        if (all_phys & BLE_HCI_LE_PHY_NO_RX_PREF_MASK) {
-            rx_phys = BLE_HCI_LE_PHY_PREF_MASK_ALL;
-        }
-        *rxphy = rx_phys;
-        rc = BLE_ERR_SUCCESS;
+    if ((tx_phys & BLE_HCI_LE_PHY_CODED_PREF_MASK) ||
+                    (rx_phys & BLE_HCI_LE_PHY_CODED_PREF_MASK)) {
+        return BLE_ERR_UNSUPPORTED;
     }
-    return rc;
+#endif
+    /* Set the default PHY preferences */
+    if (all_phys & BLE_HCI_LE_PHY_NO_TX_PREF_MASK) {
+        tx_phys = BLE_HCI_LE_PHY_PREF_MASK_ALL;
+    }
+    *txphy = tx_phys;
+
+    if (all_phys & BLE_HCI_LE_PHY_NO_RX_PREF_MASK) {
+        rx_phys = BLE_HCI_LE_PHY_PREF_MASK_ALL;
+    }
+    *rxphy = rx_phys;
+
+    return BLE_ERR_SUCCESS;
 }
 
 /**
@@ -655,9 +671,11 @@ ble_ll_is_valid_adv_mode(uint8_t ocf)
     case BLE_HCI_OCF_LE_CREATE_CONN:
     case BLE_HCI_OCF_LE_SET_ADV_PARAMS:
     case BLE_HCI_OCF_LE_SET_ADV_ENABLE:
+    case BLE_HCI_OCF_LE_SET_ADV_DATA:
     case BLE_HCI_OCF_LE_SET_SCAN_PARAMS:
     case BLE_HCI_OCF_LE_SET_SCAN_ENABLE:
     case BLE_HCI_OCF_LE_SET_SCAN_RSP_DATA:
+    case BLE_HCI_OCF_LE_RD_ADV_CHAN_TXPWR:
         if (hci_adv_mode == ADV_MODE_EXT) {
             return false;
         }
@@ -671,6 +689,20 @@ ble_ll_is_valid_adv_mode(uint8_t ocf)
     case BLE_HCI_OCF_LE_SET_EXT_SCAN_ENABLE:
     case BLE_HCI_OCF_LE_SET_EXT_SCAN_PARAM:
     case BLE_HCI_OCF_LE_SET_EXT_SCAN_RSP_DATA:
+    case BLE_HCI_OCF_LE_RD_MAX_ADV_DATA_LEN:
+    case BLE_HCI_OCF_LE_RD_NUM_OF_ADV_SETS:
+    case BLE_HCI_OCF_LE_REMOVE_ADV_SET:
+    case BLE_HCI_OCF_LE_CLEAR_ADV_SETS:
+    case BLE_HCI_OCF_LE_SET_PER_ADV_PARAMS:
+    case BLE_HCI_OCF_LE_SET_PER_ADV_DATA:
+    case BLE_HCI_OCF_LE_SET_PER_ADV_ENABLE:
+    case BLE_HCI_OCF_LE_PER_ADV_CREATE_SYNC:
+    case BLE_HCI_OCF_LE_PER_ADV_CREATE_SYNC_CANCEL:
+    case BLE_HCI_OCF_LE_PER_ADV_TERM_SYNC:
+    case BLE_HCI_OCF_LE_ADD_DEV_TO_PER_ADV_LIST:
+    case BLE_HCI_OCF_LE_REM_DEV_FROM_PER_ADV_LIST:
+    case BLE_HCI_OCF_LE_CLEAR_PER_ADV_LIST:
+    case BLE_HCI_OCF_LE_RD_PER_ADV_LIST_SIZE:
         if (hci_adv_mode == ADV_MODE_LEGACY) {
             return false;
         }
@@ -1076,8 +1108,11 @@ ll_hci_le_cmd_exit:
      * This code is here because we add 256 to the return code to denote
      * that the reply to this command should be command status (as opposed to
      * command complete).
+     *
+     * For unknown HCI command let us return always command status as per
+     * specification Bluetooth 5, Vol. 2, Chapter 4.4
      */
-    if (ble_ll_hci_le_cmd_send_cmd_status(ocf)) {
+    if (ble_ll_hci_le_cmd_send_cmd_status(ocf) || rc == BLE_ERR_UNKNOWN_HCI_CMD) {
         rc += (BLE_ERR_MAX + 1);
     }
 
@@ -1179,7 +1214,7 @@ ble_ll_hci_ctlr_bb_cmd_proc(uint8_t *cmdbuf, uint16_t ocf, uint8_t *rsplen)
         break;
 #if (MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_PING) == 1)
     case BLE_HCI_OCF_CB_RD_AUTH_PYLD_TMO:
-        rc = ble_ll_conn_hci_wr_auth_pyld_tmo(cmdbuf, rspbuf, rsplen);
+        rc = ble_ll_conn_hci_rd_auth_pyld_tmo(cmdbuf, rspbuf, rsplen);
         break;
     case BLE_HCI_OCF_CB_WR_AUTH_PYLD_TMO:
         rc = ble_ll_conn_hci_wr_auth_pyld_tmo(cmdbuf, rspbuf, rsplen);

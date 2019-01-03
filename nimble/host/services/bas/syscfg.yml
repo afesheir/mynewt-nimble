@@ -28,3 +28,7 @@ syscfg.defs:
         description: >
             Set to 1 to support notification or 0 to disable it.
         value: 1
+    BLE_SVC_BAS_SYSINIT_STAGE:
+        description: >
+            Sysinit stage for the battery level service.
+        value: 303

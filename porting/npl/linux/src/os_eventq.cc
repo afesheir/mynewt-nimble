@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "npl_osal.h"
+#include "nimble/nimble_npl.h"
 #include "wqueue.h"
 
 extern "C" {
@@ -44,6 +44,18 @@ void
 ble_npl_eventq_init(struct ble_npl_eventq *evq)
 {
     evq->q = new wqueue_t();
+}
+
+bool
+ble_npl_eventq_is_empty(struct ble_npl_eventq *evq)
+{
+    wqueue_t *q = static_cast<wqueue_t *>(evq->q);
+
+    if (q->size()) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 int
@@ -71,8 +83,11 @@ struct ble_npl_event *ble_npl_eventq_get(struct ble_npl_eventq *evq,
     struct ble_npl_event *ev;
     wqueue_t *q = static_cast<wqueue_t *>(evq->q);
 
-    ev = q->get();
-    ev->ev_queued = 0;
+    ev = q->get(tmo);
+
+    if (ev) {
+        ev->ev_queued = 0;
+    }
 
     return ev;
 }

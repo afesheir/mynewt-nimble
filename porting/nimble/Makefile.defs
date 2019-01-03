@@ -35,6 +35,7 @@ NIMBLE_INCLUDE := \
 	$(NIMBLE_ROOT)/nimble/host/store/ram/include \
 	$(NIMBLE_ROOT)/nimble/host/util/include \
 	$(NIMBLE_ROOT)/porting/nimble/include \
+	$(NULL)
 
 NIMBLE_SRC := \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_att.c \
@@ -63,6 +64,7 @@ NIMBLE_SRC := \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_hs_misc.c \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_hs_pvcy.c \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_hs_startup.c \
+	$(NIMBLE_ROOT)/nimble/host/src/ble_hs_stop.c \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_ibeacon.c \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_l2cap.c \
 	$(NIMBLE_ROOT)/nimble/host/src/ble_l2cap_coc.c \
@@ -87,11 +89,12 @@ NIMBLE_SRC := \
 	$(NIMBLE_ROOT)/nimble/host/store/ram/src/ble_store_ram.c \
 	$(NIMBLE_ROOT)/nimble/host/util/src/addr.c \
 	$(NIMBLE_ROOT)/nimble/src/ble_util.c \
-	$(NIMBLE_ROOT)/nimble/src/hci_common.c \
+        $(NULL)
 
 # Few utils and data structures copied from Mynewt
 NIMBLE_SRC += \
 	$(NIMBLE_ROOT)/porting/nimble/src/nimble_port.c \
+	$(NULL)
 
 # Few utils and data structures copied from Mynewt
 NIMBLE_SRC += \
@@ -100,6 +103,7 @@ NIMBLE_SRC += \
 	$(NIMBLE_ROOT)/porting/nimble/src/os_mbuf.c \
 	$(NIMBLE_ROOT)/porting/nimble/src/os_mempool.c \
 	$(NIMBLE_ROOT)/porting/nimble/src/os_msys_init.c \
+	$(NULL)
 
 ifneq (,$(NIMBLE_CFG_CONTROLLER))
 include $(NIMBLE_ROOT)/porting/nimble/Makefile.controller

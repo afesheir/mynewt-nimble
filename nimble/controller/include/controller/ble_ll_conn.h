@@ -70,9 +70,10 @@ enum conn_enc_state {
     CONN_ENC_S_UNENCRYPTED = 1,
     CONN_ENC_S_ENCRYPTED,
     CONN_ENC_S_ENC_RSP_WAIT,
+    CONN_ENC_S_PAUSE_ENC_RSP_WAIT,
+    CONN_ENC_S_PAUSED,
     CONN_ENC_S_START_ENC_REQ_WAIT,
     CONN_ENC_S_START_ENC_RSP_WAIT,
-    CONN_ENC_S_PAUSE_ENC_RSP_WAIT,
     CONN_ENC_S_LTK_REQ_WAIT,
     CONN_ENC_S_LTK_NEG_REPLY
 };
@@ -100,6 +101,7 @@ union ble_ll_conn_sm_flags {
         uint32_t pkt_rxd:1;
         uint32_t terminate_ind_txd:1;
         uint32_t terminate_ind_rxd:1;
+        uint32_t terminate_ind_rxd_acked:1;
         uint32_t allow_slave_latency:1;
         uint32_t slave_set_last_anchor:1;
         uint32_t awaiting_host_reply:1;
@@ -165,6 +167,8 @@ struct ble_ll_conn_phy_data
 #define CONN_CUR_TX_PHY_MASK(csm)   (1 << ((csm)->phy_data.cur_tx_phy - 1))
 #define CONN_CUR_RX_PHY_MASK(csm)   (1 << ((csm)->phy_data.cur_rx_phy - 1))
 
+#define BLE_PHY_TRANSITION_INVALID    (0xFF)
+
 /* Connection state machine */
 struct ble_ll_conn_sm
 {
@@ -200,6 +204,7 @@ struct ble_ll_conn_sm
 #if (BLE_LL_BT5_PHY_SUPPORTED == 1)
     struct ble_ll_conn_phy_data phy_data;
     uint16_t phy_instant;
+    uint8_t phy_tx_transition;
 #endif
 
     /* Used to calculate data channel index for connection */
@@ -264,6 +269,12 @@ struct ble_ll_conn_sm
     uint32_t slave_cur_tx_win_usecs;
     uint32_t slave_cur_window_widening;
     uint32_t last_rxd_pdu_cputime;  /* Used exclusively for supervision timer */
+
+    /*
+     * Used to mark that direct advertising from the peer was using
+     * identity address as InitA
+     */
+    uint8_t inita_identity_used;
 
     /* address information */
     uint8_t own_addr_type;

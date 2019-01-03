@@ -194,6 +194,9 @@ STATS_NAME_START(ble_ll_stats)
     STATS_NAME(ble_ll_stats, aux_scheduled)
     STATS_NAME(ble_ll_stats, aux_received)
     STATS_NAME(ble_ll_stats, aux_fired_for_read)
+    STATS_NAME(ble_ll_stats, aux_allocated)
+    STATS_NAME(ble_ll_stats, aux_freed)
+    STATS_NAME(ble_ll_stats, aux_sched_cb)
     STATS_NAME(ble_ll_stats, aux_conn_req_tx)
     STATS_NAME(ble_ll_stats, aux_conn_rsp_tx)
     STATS_NAME(ble_ll_stats, aux_conn_rsp_err)
@@ -524,6 +527,23 @@ ble_ll_is_our_devaddr(uint8_t *addr, int addr_type)
     }
 
     return rc;
+}
+
+/**
+ * Get identity address
+ *
+ * @param addr_type Random (1). Public(0)
+ *
+ * @return pointer to identity address of given type.
+ */
+uint8_t*
+ble_ll_get_our_devaddr(uint8_t addr_type)
+{
+    if (addr_type) {
+        return g_random_addr;
+    }
+
+    return g_dev_addr;
 }
 
 /**
@@ -1563,4 +1583,8 @@ ble_ll_init(void)
     SYSINIT_PANIC_ASSERT(rc == 0);
 
     ble_hci_trans_cfg_ll(ble_ll_hci_cmd_rx, NULL, ble_ll_hci_acl_rx, NULL);
+
+#if MYNEWT_VAL(BLE_LL_DIRECT_TEST_MODE)
+    ble_ll_dtm_init();
+#endif
 }
